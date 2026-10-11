@@ -14,4 +14,4 @@ class HealthResponse(BaseModel):
 
 @router.get("/health", response_model=HealthResponse)
 def read_health() -> HealthResponse:
-    return HealthResponse(status="ok", service="course-training-scaffold")
+    return HealthResponse(status="ok", service="ai-course-studio-local")

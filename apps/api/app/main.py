@@ -13,7 +13,7 @@ from app.api.system_routes import router as system_router
 from app.catalog import EXAMPLE_COURSE_ROOT
 
 
-app = FastAPI(title="AI Course Studio Scaffold API", version="0.1.0")
+app = FastAPI(title="AI Course Studio API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5176", "http://127.0.0.1:5176"],

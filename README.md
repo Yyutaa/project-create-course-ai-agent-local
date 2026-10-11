@@ -1,17 +1,17 @@
 # AI Course Studio（本地版）
 
-这是 AI Course Studio 的本地优先教学项目。当前代码包含 React + Vite 前端、
+AI Course Studio 是本地优先的 AI 课程生成工具。当前代码包含 React + Vite 前端、
 FastAPI、SQLite 事实库、七阶段 Graph、独立 Worker 和人工审批；它不是公网多用户服务，
 也不会自动发布课程。
 
-本仓库是原教学项目的独立副本，不包含课程示例、设计文档和 20 章实施指引。
-代码、测试、领域 Skill 与产品技术资料保留在本仓库；原项目及其 Git 远端不受影响。
+本仓库不附带课程示例和历史实施资料；代码、测试、领域 Skill 与产品技术资料
+保留在本仓库。
 
 ## 项目内容
 
 - `apps/web/`：React + TypeScript + Vite，展示七步 Run、质量证据和只读执行工作台。
 - `apps/api/`：FastAPI + 独立本地 Worker，提供 Command、Run、Artifact 与执行状态接口。
-- `.agents/skills/`：训练中需要使用的 `teach-generator`、`humanizer-zh` 和 `fastapi` 规则。
+- `.agents/skills/`：课程生成与 API 开发使用的 `teach-generator`、`humanizer-zh` 和 `fastapi` 规则。
 - `assets/aiagent/`：产品与前后端技术资料。
 
 ## 启动

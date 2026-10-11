@@ -1,1 +1,1 @@
-"""Minimal FastAPI application for the training scaffold."""
+"""FastAPI application for AI Course Studio."""

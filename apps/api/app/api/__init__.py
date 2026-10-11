@@ -1,1 +1,1 @@
-"""HTTP routes for the training scaffold."""
+"""HTTP routes for AI Course Studio."""

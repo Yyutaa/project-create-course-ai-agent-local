@@ -7,7 +7,7 @@ from app.main import app
 def test_health_check_is_available():
     assert read_health().model_dump() == {
         "status": "ok",
-        "service": "course-training-scaffold",
+        "service": "ai-course-studio-local",
     }
 
 

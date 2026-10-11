@@ -267,7 +267,7 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
   `response_model`。
 - Python 使用 Python 3.12、Ruff，单行最大 92 字符。
 - 使用 `apply_patch` 修改源码与文档；不要覆盖或回滚已有用户改动。
-- 输入路径必须规范化并限制在允许的课程目录内；初始脚手架不提供文件写入 API。
+- 输入路径必须规范化并限制在允许的课程目录内；当前 API 不提供任意文件写入接口。
 - 优先使用标准库和已有依赖。新依赖必须对应当前阶段的明确需求。
 - 不提交 `.venv/`、`node_modules/`、`.course-agent/`、缓存、构建目录或 `.env`。
 

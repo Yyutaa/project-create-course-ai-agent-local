@@ -77,7 +77,7 @@ WORKER_PID=$!
 ) &
 WEB_PID=$!
 
-echo "AI Course Studio 脚手架已启动"
+echo "AI Course Studio 已启动"
 echo "前端: http://127.0.0.1:$WEB_PORT"
 echo "API:  http://127.0.0.1:$API_PORT/docs"
 echo "Worker: 本地独立进程（无端口）"

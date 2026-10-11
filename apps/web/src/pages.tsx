@@ -56,9 +56,9 @@ export function CoursesPage() {
   return (
     <>
       <section className="page-intro">
-        <p className="eyebrow">Training scaffold</p>
-        <h1>从这里开始搭建课程生成 Agent</h1>
-        <p>React 与 FastAPI 已连通；七步 V0 可在“新建课程”中体验。示例课程与新 Run 分开显示。</p>
+        <p className="eyebrow">AI Course Studio</p>
+        <h1>创建你的课程</h1>
+        <p>填写课程目标并启动七阶段生成流程；生成中的课程会保存在“我的课程”。</p>
         <p className={health ? "api-status ok" : "api-status"}>
           API {health ? "已连接" : "连接中"}
         </p>
