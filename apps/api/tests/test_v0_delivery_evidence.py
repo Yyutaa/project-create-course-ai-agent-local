@@ -1,0 +1,322 @@
+"""Delivery evidence is linked by Run ID without copying private content."""
+
+from app.v0.execution import ExecutionStore
+from app.v0.schemas import CourseInput, GraphState
+from app.v0.storage import FactStore
+import pytest
+
+
+def test_trace_links_command_and_node_without_intake_text(tmp_path):
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        CourseInput(
+            topic="PRIVATE_TOPIC_731", audience="初学者",
+            goal="会解释变量", language="zh",
+        ),
+        "create", enqueue_start=True,
+    )
+    execution = ExecutionStore(facts.path)
+    command = execution.claim("worker-a")
+    epoch = execution.acquire(run.id, "worker-a")
+    execution.start_node(
+        run.id, "intake", GraphState(run_id=run.id), "worker-a", epoch,
+        command_id=command.id,
+    )
+
+    from app.v0.delivery import DeliveryStore
+
+    evidence = DeliveryStore(facts.path).read(run.id)
+    assert evidence.trace_id == run.id
+    assert evidence.nodes[0].command_id == command.id
+    assert command.id in {item.id for item in evidence.commands}
+    assert "PRIVATE_TOPIC_731" not in evidence.model_dump_json()
+    assert evidence.integrity_issues == []
+    assert {item.scenario for item in evidence.paths} == {
+        "normal", "recovery", "human",
+    }
+
+
+def test_trace_reports_broken_command_reference(tmp_path):
+    from app.v0.delivery import DeliveryStore
+
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        CourseInput(topic="变量", audience="初学者", goal="解释变量", language="zh"),
+        "create", enqueue_start=True,
+    )
+    execution = ExecutionStore(facts.path)
+    epoch = execution.acquire(run.id, "worker-a")
+    node_id = execution.start_node(
+        run.id, "intake", GraphState(run_id=run.id), "worker-a", epoch,
+        command_id="missing-command",
+    )
+    with facts.connect() as connection:
+        connection.execute(
+            "INSERT INTO provider_calls(id,run_id,command_id,node_execution_id,"
+            "role,status,started_at) VALUES (?,?,?,?,?,'RESERVED','now')",
+            ("call-broken", run.id, "missing-command", node_id, "mission"),
+        )
+    evidence = DeliveryStore(facts.path).read(run.id)
+    assert f"node:{node_id}:missing_command" in evidence.integrity_issues
+    assert "provider_call:call-broken:missing_command" in evidence.integrity_issues
+
+
+def test_recovery_and_human_paths_are_indexed_from_durable_facts(tmp_path):
+    from app.v0.delivery import DeliveryStore
+
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        CourseInput(topic="变量", audience="初学者", goal="解释变量", language="zh"),
+        "create", enqueue_start=True,
+    )
+    execution = ExecutionStore(facts.path)
+    command = execution.claim("worker-a")
+    epoch = execution.acquire(run.id, "worker-a")
+    execution.start_node(
+        run.id, "intake", GraphState(run_id=run.id), "worker-a", epoch,
+        command_id=command.id,
+    )
+    execution.expire_for_test(run.id)
+    epoch_2 = execution.acquire(run.id, "worker-b")
+    execution.start_node(
+        run.id, "intake", GraphState(run_id=run.id), "worker-b", epoch_2,
+        command_id=command.id,
+    )
+    execution.accept(run.id, "STOP", {}, "stop")
+    paths = {item.scenario: item for item in DeliveryStore(facts.path).read(run.id).paths}
+    assert paths["recovery"].status == "observed"
+    assert paths["human"].status == "observed"
+    assert paths["normal"].status == "not_observed"
+
+
+def test_new_command_after_resume_is_not_mislabeled_crash_takeover(tmp_path):
+    from app.v0.delivery import DeliveryStore
+
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        CourseInput(topic="变量", audience="初学者", goal="解释变量", language="zh"),
+        "create", enqueue_start=True,
+    )
+    execution = ExecutionStore(facts.path)
+    first = execution.claim("worker-a")
+    epoch = execution.acquire(run.id, "worker-a")
+    execution.start_node(
+        run.id, "intake", GraphState(run_id=run.id), "worker-a", epoch,
+        command_id=first.id,
+    )
+    execution.expire_for_test(run.id)
+    second = execution.accept(run.id, "RESUME", {}, "resume")
+    epoch = execution.acquire(run.id, "worker-b")
+    execution.start_node(
+        run.id, "intake", GraphState(run_id=run.id), "worker-b", epoch,
+        command_id=second.id,
+    )
+    recovery = next(item for item in DeliveryStore(facts.path).read(run.id).paths
+                    if item.scenario == "recovery")
+    assert recovery.status == "not_observed"
+
+
+def test_normal_delivery_path_requires_human_release_decision(tmp_path):
+    from app.v0.delivery import DeliveryStore
+    from app.v0.provider import FakeProvider
+    from app.v0.runner import V0Runner
+    from app.v0.schemas import ReleaseDecision
+    from app.v0.worker import Worker
+
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        CourseInput(topic="变量", audience="初学者", goal="解释变量", language="zh"),
+        "create", enqueue_start=True,
+    )
+    with facts.connect() as connection:
+        connection.execute("UPDATE runs SET mission_review_required=0 WHERE id=?", (run.id,))
+    Worker(facts.path, provider=FakeProvider()).run_once()
+    before = DeliveryStore(facts.path).read(run.id)
+    assert next(item for item in before.paths if item.scenario == "normal").status == "not_observed"
+    V0Runner(FakeProvider(), facts).decide(
+        run.id, ReleaseDecision(action="prepare", reason="人工已审阅"), "release-1"
+    )
+    after = DeliveryStore(facts.path).read(run.id)
+    assert next(item for item in after.paths if item.scenario == "normal").status == "observed"
+    assert after.decisions[0].action == "prepare"
+    assert after.provider_calls
+    assert all(call.node_execution_id and call.command_id for call in after.provider_calls)
+    assert after.integrity_issues == []
+
+
+def test_provider_budget_reserves_calls_and_requires_human_at_limit(tmp_path):
+    from app.v0.budget import BudgetedProvider, BudgetExceeded, BudgetStore
+    from app.v0.provider import AgentInput, AgentRequest, FakeProvider
+
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        CourseInput(topic="变量", audience="初学者", goal="解释变量", language="zh"),
+        "create", enqueue_start=True,
+    )
+    execution = ExecutionStore(facts.path)
+    command = execution.claim("worker-a")
+    epoch = execution.acquire(run.id, "worker-a")
+    budget = BudgetStore(facts.path)
+    provider = BudgetedProvider(FakeProvider(), budget)
+    provider.bind("worker-a", epoch, command.id)
+    request = AgentRequest(
+        run_id=run.id, role="mission", goal="任务定义", instructions=["仅测试"],
+        inputs=[AgentInput(kind="intake", content={"topic": "变量"})],
+        output_schema={},
+    )
+    for _ in range(60):
+        provider.invoke(request)
+    with pytest.raises(BudgetExceeded):
+        provider.invoke(request)
+    assert budget.summary(run.id).used == 60
+    assert budget.summary(run.id).requires_human
+    from app.v0.delivery import DeliveryStore
+
+    assert len(DeliveryStore(facts.path).read(run.id).provider_calls) == 60
+    with facts.connect() as connection:
+        kinds = [row[0] for row in connection.execute(
+            "SELECT type FROM events WHERE run_id=? AND type LIKE 'budget.%' "
+            "ORDER BY id", (run.id,),
+        )]
+    assert kinds == ["budget.warning", "budget.exhausted"]
+
+
+def test_human_revision_can_approve_exactly_twenty_more_calls(tmp_path):
+    from app.v0.budget import BudgetStore
+
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        CourseInput(topic="变量", audience="初学者", goal="解释变量", language="zh"),
+        "create", enqueue_start=True,
+    )
+    execution = ExecutionStore(facts.path)
+    epoch = execution.acquire(run.id, "worker-a")
+    waiting = facts.get_run(run.id)
+    waiting.status = "waiting_for_human"
+    waiting.stages[1].status = "waiting_for_human"
+    facts.record(waiting, "stage.waiting", "mission")
+    with facts.connect() as connection:
+        for index in range(60):
+            connection.execute(
+                "INSERT INTO provider_calls(id,run_id,role,status,started_at) "
+                "VALUES (?,?,?,'SUCCEEDED','now')",
+                (f"call-{index}", run.id, "mission"),
+            )
+    checkpoint_id = execution.last_checkpoint(run.id)["id"]
+    command = execution.accept(run.id, "REVISE", {
+        "text": "批准继续", "expected_checkpoint_id": checkpoint_id,
+        "provider_limit": 80,
+    }, "revise-1")
+    with pytest.raises(ValueError, match="预算耗尽"):
+        execution.record_revision(command, "worker-a", epoch)
+    waiting = facts.get_run(run.id)
+    waiting.stages[1].failure_reason = "Provider 调用预算耗尽，需要人工处理"
+    facts.record(waiting, "stage.waiting", "mission")
+    with facts.connect() as connection:
+        from app.v0.budget import BudgetStore
+
+        BudgetStore._event(connection, run.id, "budget.exhausted")
+    execution.record_revision(command, "worker-a", epoch)
+    assert BudgetStore(facts.path).summary(run.id).limit == 80
+    with facts.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM events WHERE run_id=? AND type='budget.approved'",
+            (run.id,),
+        ).fetchone()[0] == 1
+
+
+def test_provider_error_never_exposes_secret_in_run_or_command(tmp_path):
+    from app.v0.provider import FakeProvider, ProviderError
+    from app.v0.worker import Worker
+
+    class LeakingProvider(FakeProvider):
+        def invoke(self, request):
+            raise ProviderError("api_key=TOPSECRET_731")
+
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        CourseInput(topic="变量", audience="初学者", goal="解释变量", language="zh"),
+        "create", enqueue_start=True,
+    )
+    assert Worker(facts.path, provider=LeakingProvider()).run_once()
+    execution = ExecutionStore(facts.path)
+    assert "TOPSECRET_731" not in facts.get_run(run.id).model_dump_json()
+    assert "TOPSECRET_731" not in execution.read_model(run.id).model_dump_json()
+
+
+def test_repair_budget_wait_emits_durable_manual_alert(tmp_path):
+    from app.v0.provider import FakeProvider
+    from app.v0.runner import V0Runner
+
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    runner = V0Runner(FakeProvider(), facts)
+    run = runner.create(
+        CourseInput(topic="变量", audience="初学者", goal="解释变量", language="zh")
+    )
+    runner._mark_waiting(run.id, 5, "返工预算耗尽，需要人工处理")
+    with facts.connect() as connection:
+        kinds = [row[0] for row in connection.execute(
+            "SELECT type FROM events WHERE run_id=? ORDER BY id", (run.id,),
+        )]
+    assert "budget.repair_exhausted" in kinds
+    from app.v0.budget import BudgetStore
+
+    assert BudgetStore(facts.path).summary(run.id).repair_limit == 3
+
+
+def test_provider_limit_stops_graph_at_human_gate(tmp_path):
+    from app.v0.provider import FakeProvider
+    from app.v0.worker import Worker
+
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        CourseInput(topic="变量", audience="初学者", goal="解释变量", language="zh"),
+        "create", enqueue_start=True,
+    )
+    with facts.connect() as connection:
+        connection.execute("UPDATE runs SET mission_review_required=0 WHERE id=?", (run.id,))
+    with facts.connect() as connection:
+        connection.execute(
+            "INSERT INTO budget_limits(run_id,provider_limit) VALUES (?,1)", (run.id,)
+        )
+    Worker(facts.path, provider=FakeProvider()).run_once()
+    result = facts.get_run(run.id)
+    assert result.status == "waiting_for_human"
+    assert result.stages[2].status == "waiting_for_human"
+    with facts.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM events WHERE run_id=? AND type='budget.exhausted'",
+            (run.id,),
+        ).fetchone()[0] == 1
+
+
+def test_trace_rule_identifier_does_not_echo_model_text():
+    from app.v0.delivery import safe_rule_id
+
+    result = safe_rule_id("api_key=TOPSECRET_731")
+    assert result.startswith("rule-")
+    assert "TOPSECRET_731" not in result
+
+
+def test_execution_read_model_hides_historical_wait_reason(tmp_path):
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        CourseInput(topic="变量", audience="初学者", goal="解释变量", language="zh"),
+        "create", enqueue_start=True,
+    )
+    waiting = facts.get_run(run.id)
+    waiting.status = "waiting_for_human"
+    waiting.stages[1].status = "waiting_for_human"
+    waiting.stages[1].failure_reason = "api_key=TOPSECRET_731"
+    facts.record(waiting, "stage.waiting", "mission")
+    assert "TOPSECRET_731" not in ExecutionStore(facts.path).read_model(run.id).model_dump_json()

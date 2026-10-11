@@ -1,0 +1,162 @@
+import sqlite3
+
+import pytest
+
+from app.v0 import storage
+from app.v0.schemas import ArtifactRef, BlueprintDraft, BlueprintLesson, MissionDraft
+from app.v0.workspace import Workspace
+
+
+def test_migration_is_repeatable_and_preserves_rows(tmp_path):
+    store = storage.FactStore(tmp_path / "facts.sqlite3")
+    store.migrate()
+    with store.connect() as connection:
+        connection.execute(
+            "INSERT INTO courses(id, title, workspace_key, created_at) VALUES (?, ?, ?, ?)",
+            ("c1", "第一门课", "c1", "2026-09-22T00:00:00Z"),
+        )
+    store.migrate()
+    assert store.schema_version() == 7
+    with store.connect() as connection:
+        assert (
+            connection.execute("SELECT title FROM courses WHERE id='c1'").fetchone()[0]
+            == "第一门课"
+        )
+
+
+def test_foreign_keys_and_transaction_rollback(tmp_path):
+    store = storage.FactStore(tmp_path / "facts.sqlite3")
+    store.migrate()
+    with pytest.raises(sqlite3.IntegrityError):
+        with store.connect() as connection:
+            connection.execute(
+                "INSERT INTO runs(id, course_id, status, idempotency_key, request_hash, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("r1", "missing", "running", "k1", "hash", "now", "now"),
+            )
+    with store.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+
+
+def test_workspace_rejects_symlink_escape(tmp_path):
+    root = tmp_path / "workspaces"
+    course = root / "c1"
+    course.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (course / "runs").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="越界"):
+        Workspace(root).write_lesson("c1", "r1", 1, "# 课程")
+    assert list(outside.iterdir()) == []
+
+
+def test_migration_upgrades_v1_artifacts_without_inventing_provenance(tmp_path):
+    path = tmp_path / "facts.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE artifacts (artifact_id TEXT NOT NULL, version INTEGER NOT NULL, "
+            "run_id TEXT NOT NULL, kind TEXT NOT NULL, content_json TEXT NOT NULL, "
+            "content_hash TEXT NOT NULL, workspace_relpath TEXT, created_at TEXT NOT NULL, "
+            "PRIMARY KEY(artifact_id, version), UNIQUE(run_id, kind, version))"
+        )
+        connection.execute("PRAGMA user_version=1")
+
+    store = storage.FactStore(path)
+    store.migrate()
+
+    assert store.schema_version() == 7
+    with store.connect() as connection:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(artifacts)").fetchall()
+        }
+        assert {"producer_role", "source_refs_json"} <= columns
+
+
+def test_artifact_producer_and_source_refs_survive_snapshot_rebuild(tmp_path):
+    store = storage.FactStore(tmp_path / "facts.sqlite3")
+    store.migrate()
+    course = storage.CourseInput(
+        topic="React",
+        audience="初学者",
+        goal="完成页面",
+        language="zh",
+    )
+    run, _ = store.create_run(course, "start-provenance")
+    run.stages[1].status = "succeeded"
+    mission = MissionDraft(
+        audience="初学者",
+        learning_goal="完成页面",
+        scope="React 基础",
+        stop_conditions=["目标冲突时停止"],
+    )
+    run.mission = mission
+    run = store.record(
+        run,
+        "stage.succeeded",
+        "mission",
+        mission,
+        producer_role="mission",
+        source_refs=[],
+    )
+    mission_summary = run.artifacts[-1]
+    mission_ref = ArtifactRef(
+        run_id=run.id,
+        artifact_id=mission_summary.artifact_id,
+        version=mission_summary.version,
+        kind=mission_summary.kind,
+        content_hash=mission_summary.content_hash,
+    )
+    run.stages[2].status = "succeeded"
+    blueprint = BlueprintDraft(
+        lessons=[
+            BlueprintLesson(
+                title="第一课",
+                learning_goal="完成页面",
+                evidence="页面可运行",
+            )
+        ]
+    )
+    run.blueprint = blueprint
+    run = store.record(
+        run,
+        "stage.succeeded",
+        "blueprint",
+        blueprint,
+        producer_role="blueprint",
+        source_refs=[mission_ref],
+    )
+    blueprint_summary = run.artifacts[-1]
+
+    with store.connect() as connection:
+        connection.execute("DELETE FROM snapshots WHERE run_id=?", (run.id,))
+    rebuilt = store.get_run(run.id)
+    rebuilt_blueprint = next(item for item in rebuilt.artifacts if item.kind == "blueprint")
+    detail = store.get_artifact(blueprint_summary.artifact_id, blueprint_summary.version)
+
+    assert rebuilt_blueprint.producer_role == "blueprint"
+    assert rebuilt_blueprint.source_refs == [mission_ref]
+    assert detail.producer_role == "blueprint"
+    assert detail.source_refs == [mission_ref]
+
+
+def test_v2_database_upgrades_to_execution_protocol_without_recreating_runs(tmp_path):
+    path = tmp_path / "facts.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE runs (id TEXT PRIMARY KEY)")
+        connection.execute("INSERT INTO runs VALUES ('existing-run')")
+        connection.execute("PRAGMA user_version=2")
+
+    store = storage.FactStore(path)
+    store.migrate()
+    store.migrate()
+
+    with store.connect() as connection:
+        assert store.schema_version() == 7
+        assert connection.execute("SELECT id FROM runs").fetchone()[0] == "existing-run"
+        assert connection.execute(
+            "SELECT mission_review_required FROM runs WHERE id='existing-run'"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='commands'"
+        ).fetchone()[0] == "commands"

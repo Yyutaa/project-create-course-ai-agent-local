@@ -1,0 +1,345 @@
+:root {
+  color: #202522;
+  background: #f5f6f1;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.app-shell {
+  min-height: 100vh;
+}
+
+.site-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  min-height: 64px;
+  padding: 0 5vw;
+  border-bottom: 1px solid #d6d9d2;
+  background: #ffffff;
+}
+
+.brand {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+nav {
+  display: flex;
+  gap: 18px;
+}
+
+nav a {
+  color: #5b635d;
+  font-size: 14px;
+}
+
+nav a.active {
+  color: #202522;
+  font-weight: 700;
+}
+
+.page {
+  width: min(1060px, 90vw);
+  margin: 0 auto;
+  padding: 72px 0;
+}
+
+.page-intro,
+.workflow-page,
+.placeholder-page {
+  max-width: 760px;
+}
+
+.eyebrow {
+  margin: 0 0 12px;
+  color: #53735f;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+h1,
+h2,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  margin-bottom: 16px;
+  font-size: 36px;
+  line-height: 1.2;
+}
+
+h2 {
+  font-size: 22px;
+  line-height: 1.35;
+}
+
+p {
+  color: #526057;
+  line-height: 1.7;
+}
+
+.api-status {
+  display: inline-block;
+  margin-top: 8px;
+  color: #778079;
+  font-size: 14px;
+}
+
+.api-status.ok {
+  color: #247142;
+}
+
+.notice {
+  margin: 36px 0 0;
+}
+
+.notice.error {
+  color: #9e3128;
+}
+
+.course-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  margin-top: 40px;
+}
+
+.course-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 286px;
+  padding: 24px;
+  border: 1px solid #d6d9d2;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.card-meta {
+  display: flex;
+  justify-content: space-between;
+  color: #68726b;
+  font-size: 13px;
+}
+
+.course-card h2 {
+  margin: 32px 0 12px;
+}
+
+.course-card code {
+  overflow-wrap: anywhere;
+}
+
+.lesson-markdown {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  line-height: 1.7;
+}
+
+.course-link {
+  margin-top: auto;
+  padding-top: 18px;
+  border-top: 1px solid #e0e3dc;
+  color: #1f6a3e;
+  font-weight: 700;
+}
+
+.workflow-list {
+  display: grid;
+  gap: 0;
+  margin: 36px 0 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid #d6d9d2;
+}
+
+.workflow-list li {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 16px;
+  padding: 20px 0;
+  border-bottom: 1px solid #d6d9d2;
+}
+
+.workflow-list li > span {
+  color: #53735f;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+
+.workflow-list strong {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 16px;
+}
+
+.workflow-list p {
+  margin: 6px 0 0;
+}
+
+.run-page {
+  max-width: 860px;
+}
+
+.course-form,
+.release-panel,
+.result-card,
+.run-summary {
+  margin-top: 28px;
+  padding: 24px;
+  border: 1px solid #d6d9d2;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.course-form label,
+.release-panel label {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 18px;
+  font-weight: 600;
+}
+
+.course-form input,
+.course-form textarea,
+.release-panel textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #9ba99d;
+  border-radius: 5px;
+  font: inherit;
+}
+
+.course-form textarea,
+.release-panel textarea {
+  min-height: 88px;
+}
+
+button {
+  padding: 10px 18px;
+  border: 0;
+  border-radius: 5px;
+  color: #fff;
+  background: #1f6a3e;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+
+button.secondary {
+  color: #202522;
+  background: #e6e9e4;
+}
+
+.config-dialog {
+  width: min(480px, calc(100vw - 32px));
+  padding: 24px;
+  border: 1px solid #d6d9d2;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.config-dialog::backdrop {
+  background: rgb(20 30 22 / 50%);
+}
+
+.config-dialog label {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0;
+  font-weight: 600;
+}
+
+.config-dialog input,
+.config-dialog select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #9ba99d;
+  border-radius: 5px;
+  font: inherit;
+}
+
+.config-dialog .config-hint {
+  font-size: 13px;
+}
+
+.config-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.run-stages {
+  margin-top: 28px;
+}
+
+.stage-state {
+  margin-left: 10px;
+  padding: 3px 8px;
+  border-radius: 12px;
+  background: #e6e9e4;
+  color: #526057;
+  font-size: 12px;
+}
+
+.stage-state.succeeded,
+.stage-state.waiting_for_human {
+  background: #dceee1;
+  color: #1f6a3e;
+}
+
+.stage-state.failed,
+.stage-state.stopped {
+  background: #fae3df;
+  color: #9e3128;
+}
+
+.result-card pre {
+  overflow-x: auto;
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
+
+.release-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+@media (max-width: 640px) {
+  .site-header {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 18px 5vw;
+  }
+
+  .page {
+    padding: 48px 0;
+  }
+
+  h1 {
+    font-size: 30px;
+  }
+}

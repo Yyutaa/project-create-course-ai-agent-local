@@ -1,0 +1,31 @@
+# macOS and editor files
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Dependency and virtual-environment directories
+node_modules/
+**/node_modules/
+.venv/
+**/.venv/
+
+# Local runtime data, caches, and build output
+.course-agent/
+**/.agent-history/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.tsbuildinfo
+dist/
+.vite/
+coverage/
+.docs/specs/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
