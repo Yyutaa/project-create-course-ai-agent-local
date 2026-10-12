@@ -837,6 +837,28 @@ class FactStore:
                 workspace_relpath=row["workspace_relpath"],
             )
 
+    def has_artifact_event(self, run_id: str, event_type: str, ref: ArtifactRef) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM events JOIN artifacts "
+                "ON artifacts.artifact_id=events.artifact_id "
+                "AND artifacts.version=events.artifact_version "
+                "WHERE events.run_id=? AND events.type=? "
+                "AND artifacts.run_id=? AND artifacts.artifact_id=? "
+                "AND artifacts.version=? AND artifacts.kind=? "
+                "AND artifacts.content_hash=? LIMIT 1",
+                (
+                    run_id,
+                    event_type,
+                    ref.run_id,
+                    ref.artifact_id,
+                    ref.version,
+                    ref.kind,
+                    ref.content_hash,
+                ),
+            ).fetchone()
+        return row is not None
+
     @staticmethod
     def _source_refs(value: str) -> list[ArtifactRef]:
         return [ArtifactRef.model_validate(item) for item in json.loads(value)]

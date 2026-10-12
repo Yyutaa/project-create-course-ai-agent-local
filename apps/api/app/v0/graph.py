@@ -17,7 +17,13 @@ from app.v0.quality_loop import (
     review_gate,
 )
 from app.v0.runner import V0_QUALITY_LIMITATIONS
-from app.v0.schemas import GraphState, QualitySummary, ReleaseDecision, VerificationLink
+from app.v0.schemas import (
+    BLUEPRINT_CHAPTER_DEVIATION_REASON,
+    GraphState,
+    QualitySummary,
+    ReleaseDecision,
+    VerificationLink,
+)
 
 
 class GraphRouteError(ValueError):
@@ -343,9 +349,36 @@ class WorkflowNodes:
 
     def _batch_plan(self, state: GraphState, index: int) -> dict:
         blueprint_ref = self._ref(state, "blueprint")
-        blueprint = self.runner.get(state.run_id).blueprint
+        run = self.runner.get(state.run_id)
+        blueprint = run.blueprint
         if blueprint is None:
             raise ValueError("Batch Plan 缺少 Blueprint")
+        if run.constraints_version == 1:
+            self.runner._record_artifact_event(
+                state.run_id,
+                "blueprint.chapter_count_observed",
+                "batch_plan",
+                blueprint_ref,
+            )
+            outside_tolerance = (
+                abs(len(blueprint.lessons) - run.course_input.expected_chapters) > 1
+            )
+            accepted = self.runner._has_artifact_event(
+                state.run_id,
+                "blueprint.chapter_deviation_accepted",
+                blueprint_ref,
+            )
+            if outside_tolerance and not accepted:
+                self.runner._mark_waiting(
+                    state.run_id,
+                    index,
+                    BLUEPRINT_CHAPTER_DEVIATION_REASON,
+                )
+                return {
+                    "current_node": "batch_plan",
+                    "last_outcome": "waiting_for_human",
+                    "exit_reason": "blueprint_chapter_deviation",
+                }
         result = build_batch_plan(blueprint)
         self.runner._mark_succeeded(
             state.run_id,

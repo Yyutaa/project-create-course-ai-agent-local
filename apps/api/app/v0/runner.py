@@ -215,6 +215,29 @@ class V0Runner:
                 accepted_ref=reference,
             )
 
+    def _record_artifact_event(
+        self, run_id: str, event_type: str, stage: str, reference: ArtifactRef
+    ) -> None:
+        if self.store is None or self.store.has_artifact_event(
+            run_id, event_type, reference
+        ):
+            return
+        with self._lock:
+            self._commit(
+                self._current(run_id),
+                event_type,
+                stage,
+                accepted_ref=reference,
+            )
+
+    def _has_artifact_event(
+        self, run_id: str, event_type: str, reference: ArtifactRef
+    ) -> bool:
+        return bool(
+            self.store
+            and self.store.has_artifact_event(run_id, event_type, reference)
+        )
+
     def _load_artifact(self, artifact_id: str, version: int) -> ArtifactRecord:
         if self.store is not None:
             return self.store.get_artifact(artifact_id, version)

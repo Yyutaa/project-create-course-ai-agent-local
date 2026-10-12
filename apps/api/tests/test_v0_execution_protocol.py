@@ -21,9 +21,15 @@ def stores(tmp_path):
         "create-1",
     )
     # These protocol tests predate Mission approval; preserve their downstream fixture.
+    run.constraints_version = 0
     with facts.connect() as connection:
         connection.execute(
-            "UPDATE runs SET mission_review_required=0 WHERE id=?", (run.id,)
+            "UPDATE runs SET mission_review_required=0, constraints_version=0 WHERE id=?",
+            (run.id,),
+        )
+        connection.execute(
+            "UPDATE snapshots SET projection_json=? WHERE run_id=?",
+            (run.model_dump_json(), run.id),
         )
     return facts, ExecutionStore(facts.path), run.id
 
@@ -144,6 +150,57 @@ def test_worker_executes_accepted_start_independent_of_api(stores):
     assert commands.current_node(run_id)["status"] == "COMMITTED"
     assert commands.last_checkpoint(run_id)["position"] == "after_node"
     assert commands.read_model(run_id).waiting_reason
+
+
+def test_resume_accepts_exact_blueprint_chapter_deviation_once(tmp_path):
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        CourseInput(topic="变量", audience="初学者", goal="会解释变量", language="zh"),
+        "chapter-deviation-create",
+    )
+    with facts.connect() as connection:
+        connection.execute(
+            "UPDATE runs SET mission_review_required=0 WHERE id=?", (run.id,)
+        )
+    commands = ExecutionStore(facts.path)
+
+    class FourteenLessons(FakeProvider):
+        def invoke(self, request):
+            if request.role == "blueprint":
+                return AgentResponse(role="blueprint", payload={"lessons": [
+                    {
+                        "title": f"章节 {index}",
+                        "learning_goal": f"学会主题 {index}",
+                        "evidence": f"练习 {index}",
+                    }
+                    for index in range(14)
+                ]})
+            return super().invoke(request)
+
+    commands.accept(run.id, "START", {}, "start-chapter-deviation")
+    worker = Worker(facts.path, provider=FourteenLessons(), owner="worker-a")
+    assert worker.run_once()
+    waiting = facts.get_run(run.id)
+    assert waiting.stages[3].status == "waiting_for_human"
+    blueprint = next(item for item in waiting.artifacts if item.kind == "blueprint")
+
+    commands.accept(run.id, "RESUME", {}, "accept-chapter-deviation")
+    assert worker.run_once()
+
+    resumed = facts.get_run(run.id)
+    assert resumed.batch_plan is not None
+    with facts.connect() as connection:
+        events = connection.execute(
+            "SELECT artifact_id, artifact_version FROM events WHERE run_id=? "
+            "AND type='blueprint.chapter_deviation_accepted'",
+            (run.id,),
+        ).fetchall()
+    assert len(events) == 1
+    assert (events[0]["artifact_id"], events[0]["artifact_version"]) == (
+        blueprint.artifact_id,
+        blueprint.version,
+    )
 
 
 def test_crash_after_mission_artifact_reuses_committed_version(stores):

@@ -36,8 +36,17 @@ COURSE = CourseInput(
 
 def execute_legacy(runner: V0Runner, run_id: str) -> None:
     # Existing graph tests exercise downstream routes as a pre-gate Run.
+    run = runner.get(run_id)
+    run.constraints_version = 0
     with runner.store.connect() as connection:
-        connection.execute("UPDATE runs SET mission_review_required=0 WHERE id=?", (run_id,))
+        connection.execute(
+            "UPDATE runs SET mission_review_required=0, constraints_version=0 WHERE id=?",
+            (run_id,),
+        )
+        connection.execute(
+            "UPDATE snapshots SET projection_json=? WHERE run_id=?",
+            (run.model_dump_json(), run_id),
+        )
     runner.execute(run_id)
 
 
@@ -104,6 +113,63 @@ class MultiLessonProvider(FakeProvider):
                 ).model_dump(),
             )
         return super().invoke(request)
+
+
+@pytest.mark.parametrize("lesson_count", [11, 13])
+def test_blueprint_chapter_count_allows_one_chapter_tolerance(
+    tmp_path, lesson_count
+):
+    provider = MultiLessonProvider(lesson_count=lesson_count)
+    runner = V0Runner(provider, store=FactStore(tmp_path / "facts.sqlite3"))
+    created = runner.create(COURSE, request_key=f"chapter-boundary-{lesson_count}")
+    with runner.store.connect() as connection:
+        connection.execute(
+            "UPDATE runs SET mission_review_required=0 WHERE id=?", (created.id,)
+        )
+
+    runner.execute(created.id)
+
+    run = runner.get(created.id)
+    assert run.batch_plan is not None
+    assert run.stages[2].status == "succeeded"
+    assert run.stages[3].status == "succeeded"
+    blueprint_input = provider.blueprint_requests[0].inputs[0].content
+    assert blueprint_input["generation_constraints"] == {"expected_chapters": 12}
+    assert "topic" not in blueprint_input
+    assert provider.writer_requests[0].inputs[0].content == {
+        "generation_constraints": {"min_effective_chars": 12_000}
+    }
+
+
+def test_blueprint_chapter_count_outlier_waits_before_batch_plan(tmp_path):
+    provider = MultiLessonProvider(lesson_count=14)
+    store = FactStore(tmp_path / "facts.sqlite3")
+    runner = V0Runner(provider, store=store)
+    created = runner.create(COURSE, request_key="chapter-outlier")
+    with store.connect() as connection:
+        connection.execute(
+            "UPDATE runs SET mission_review_required=0 WHERE id=?", (created.id,)
+        )
+
+    runner.execute(created.id)
+
+    run = runner.get(created.id)
+    assert run.status == "waiting_for_human"
+    assert run.stages[3].status == "waiting_for_human"
+    assert run.stages[3].failure_reason == "章节数偏离预期，需要人工确认"
+    assert run.batch_plan is None
+    assert provider.writer_requests == []
+    with store.connect() as connection:
+        event = connection.execute(
+            "SELECT artifact_id, artifact_version FROM events "
+            "WHERE run_id=? AND type='blueprint.chapter_count_observed'",
+            (created.id,),
+        ).fetchone()
+    blueprint = next(item for item in run.artifacts if item.kind == "blueprint")
+    assert (event["artifact_id"], event["artifact_version"]) == (
+        blueprint.artifact_id,
+        blueprint.version,
+    )
 
 
 def state(**updates):
@@ -228,12 +294,6 @@ def test_two_batches_update_ledger_and_pass_previous_summary(tmp_path):
     assert len(run.batch_plan.batches) == 2
     assert len(run.batch_plan.continuity_ledger) == 4
     assert len(provider.writer_requests) == 4
-    blueprint_input = provider.blueprint_requests[0].inputs[0].content
-    assert blueprint_input["generation_constraints"] == {"expected_chapters": 12}
-    assert "topic" not in blueprint_input
-    assert provider.writer_requests[0].inputs[0].content == {
-        "generation_constraints": {"min_effective_chars": 12_000}
-    }
     second_batch_first = provider.writer_requests[3]
     assert (
         second_batch_first.inputs[2].content["previous_lesson_summary"]

@@ -9,7 +9,11 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict
 
 from app.v0.storage import FactStore, command_hash
-from app.v0.schemas import ArtifactRef, GraphState
+from app.v0.schemas import (
+    BLUEPRINT_CHAPTER_DEVIATION_REASON,
+    ArtifactRef,
+    GraphState,
+)
 from app.v0.sensitive import safe_error, safe_waiting_reason
 from app.v0.budget import BudgetStore, BudgetSummary
 
@@ -519,6 +523,28 @@ class ExecutionStore:
                     or review["content_hash"] != mission_ref.content_hash
                 ):
                     raise ValueError("Mission 尚未获人工确认，不能由 RESUME 替代")
+        if state.current_node == "batch_plan":
+            blueprint_ref = state.artifact_refs.get("blueprint")
+            batch_stage = run.stages[3]
+            if (
+                run.constraints_version == 1
+                and blueprint_ref is not None
+                and batch_stage.status == "waiting_for_human"
+                and batch_stage.failure_reason == BLUEPRINT_CHAPTER_DEVIATION_REASON
+                and not self.facts.has_artifact_event(
+                    run_id,
+                    "blueprint.chapter_deviation_accepted",
+                    blueprint_ref,
+                )
+            ):
+                self.facts.record(
+                    run,
+                    "blueprint.chapter_deviation_accepted",
+                    "batch_plan",
+                    accepted_ref=blueprint_ref,
+                    lease_owner=owner,
+                    lease_epoch=epoch,
+                )
         run.status = "running"
         active = next(
             (item for item in run.stages if item.status in ("stopped", "waiting_for_human")),
