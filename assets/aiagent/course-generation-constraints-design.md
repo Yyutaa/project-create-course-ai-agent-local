@@ -195,7 +195,7 @@ Event、Snapshot 和证据包只记录约束值、实际计数、ArtifactRef、�
 
 ```bash
 apps/api/.venv/bin/python -m pytest apps/api/tests
-npm --prefix apps/web test
+npm --prefix apps/web run test:v0
 npm --prefix apps/web run typecheck
 npm --prefix apps/web run build
 ```
