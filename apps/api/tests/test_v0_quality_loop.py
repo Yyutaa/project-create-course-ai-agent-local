@@ -140,6 +140,27 @@ def test_effective_count_only_closes_fence_with_valid_closing_line(
     assert effective_character_count(markdown) == len(visible)
 
 
+def test_markdown_structure_accepts_valid_long_fence_with_short_inner_marker():
+    report = check_markdown(
+        "# 标题\n\n````py\n```not-a-close\nvalue\n````",
+        LESSON_REF,
+        "lesson-1",
+    )
+
+    assert not any(item.rule_id == "markdown.fence" for item in report.findings)
+
+
+def test_markdown_structure_rejects_unclosed_tilde_fence():
+    report = check_markdown(
+        "# 标题\n\n~~~py\nvalue",
+        LESSON_REF,
+        "lesson-1",
+    )
+
+    finding = next(item for item in report.findings if item.rule_id == "markdown.fence")
+    assert finding.location.line_start == 3
+
+
 def test_effective_character_minimum_creates_blocking_finding():
     report = check_markdown(
         "# 标题\n\n正文",

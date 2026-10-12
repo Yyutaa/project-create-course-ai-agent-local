@@ -21,26 +21,34 @@ from app.v0.schemas import (
 GATE_ORDER = ("deterministic", "rubric", "humanizer")
 
 
-def effective_character_count(markdown: str) -> int:
-    """Count visible lesson characters while preserving fenced code content."""
+def _scan_fences(markdown: str) -> tuple[list[str], int, int]:
     prose_lines = []
     code_chars = 0
     fence_marker = None
-    for line in markdown.splitlines():
+    fence_line = 0
+    for number, line in enumerate(markdown.splitlines(), 1):
         if fence_marker is None:
             marker = re.match(r"^[ \t]*(`{3,}|~{3,})", line)
             if marker:
                 fence_marker = (marker.group(1)[0], len(marker.group(1)))
+                fence_line = number
                 continue
         else:
             marker, minimum = fence_marker
             if re.fullmatch(rf"[ \t]*{re.escape(marker)}{{{minimum},}}[ \t]*", line):
                 fence_marker = None
+                fence_line = 0
                 continue
         if fence_marker:
             code_chars += len(re.sub(r"\s+", "", line))
         else:
             prose_lines.append(line)
+    return prose_lines, code_chars, fence_line
+
+
+def effective_character_count(markdown: str) -> int:
+    """Count visible lesson characters while preserving fenced code content."""
+    prose_lines, code_chars, _ = _scan_fences(markdown)
     text = "\n".join(prose_lines)
     text = re.sub(r"<[^>]*>", "", text)
     text = re.sub(r"!?\[([^]]*)\]\([^)]*\)", r"\1", text)
@@ -70,10 +78,7 @@ def check_markdown(
     problems: list[tuple[str, int, str, str]] = []
     if not lines or not lines[0].startswith("# ") or not lines[0][2:].strip():
         problems.append(("markdown.h1", 1, "首行缺少一级标题", "首行应为一级标题"))
-    fence_line = 0
-    for number, line in enumerate(lines, 1):
-        if line.lstrip().startswith("```"):
-            fence_line = 0 if fence_line else number
+    _, _, fence_line = _scan_fences(markdown)
     if fence_line:
         problems.append(("markdown.fence", fence_line, "代码围栏未闭合", "闭合代码围栏"))
     findings = []
