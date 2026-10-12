@@ -18,6 +18,19 @@ export function canStartRun(config?: Pick<LlmConfigStatus, "configured">): boole
   return config?.configured === true;
 }
 
+export function courseCreationAction(
+  config: Pick<LlmConfigStatus, "configured"> | undefined,
+  busy: boolean,
+): { disabled: boolean; label: string } {
+  if (!canStartRun(config)) {
+    return { disabled: true, label: "配置 DeepSeek 后执行" };
+  }
+  if (busy) {
+    return { disabled: true, label: "正在创建课程…" };
+  }
+  return { disabled: false, label: "创建课程并执行 Run" };
+}
+
 export function generationConstraintLabels(
   input: Pick<CourseInput, "expected_chapters" | "min_effective_chars" | "token_limit">,
 ): string[] {

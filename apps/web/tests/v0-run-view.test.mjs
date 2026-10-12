@@ -5,6 +5,7 @@ import {
   artifactHandoffLabel,
   batchProgressLabel,
   canStartRun,
+  courseCreationAction,
   canDecideRelease,
   canReviewMission,
   canResumeRun,
@@ -107,6 +108,21 @@ test("new Run stays gated until local config is ready", () => {
   assert.equal(canStartRun(undefined), false);
   assert.equal(canStartRun({ configured: false, error: "keyring_unavailable" }), false);
   assert.equal(canStartRun({ configured: true, error: null }), true);
+});
+
+test("course creation action exposes its real execution state", () => {
+  assert.deepEqual(courseCreationAction(undefined, false), {
+    disabled: true,
+    label: "配置 DeepSeek 后执行",
+  });
+  assert.deepEqual(courseCreationAction({ configured: true, error: null }, true), {
+    disabled: true,
+    label: "正在创建课程…",
+  });
+  assert.deepEqual(courseCreationAction({ configured: true, error: null }, false), {
+    disabled: false,
+    label: "创建课程并执行 Run",
+  });
 });
 
 test("generation constraints and token usage have stable readable labels", () => {

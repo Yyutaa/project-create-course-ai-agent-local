@@ -12,6 +12,7 @@ import {
   canStartRun,
   canDecideRelease,
   canReviewMission,
+  courseCreationAction,
   courseProgressLabel,
   continuityLedgerLabels,
   generationConstraintLabels,
@@ -58,37 +59,55 @@ export function CoursesPage() {
 
   return (
     <>
-      <section className="page-intro">
-        <p className="eyebrow">AI Course Studio</p>
-        <h1>创建你的课程</h1>
-        <p>填写课程目标并启动七阶段生成流程；生成中的课程会保存在“我的课程”。</p>
-        <p className={health ? "api-status ok" : "api-status"}>
-          API {health ? "已连接" : "连接中"}
-        </p>
+      <section className="dashboard-heading">
+        <div>
+          <h1>课程不是一次生成，而是一条可以恢复的生产线</h1>
+          <p>每门课程都会进入独立工作台，可审阅章节、查看质量证据，或启动新的课程 Agent Run。</p>
+        </div>
+        <Link className="primary-button" to="/new"><span aria-hidden="true">✦</span>创建课程</Link>
       </section>
 
       {error && <p className="notice error">{error}</p>}
-      {!error && !health && <p className="notice">正在读取本地课程目录。</p>}
+      {!error && !health && <p className="notice">正在连接本地课程服务。</p>}
+      {health && <p className="connection-note"><span />本地服务已连接</p>}
 
-      <section aria-label="我的课程">
-        <h2>我的课程（草稿）</h2>
+      <section aria-label="我的课程" className="course-section">
+        <div className="section-heading">
+          <div><p className="eyebrow">Workspace</p><h2>我的课程</h2></div>
+          <span>{drafts.length} 门草稿</span>
+        </div>
         {draftsError && <p className="notice error">无法读取我的课程：{draftsError}</p>}
         <div className="course-grid">
           {drafts.map((course) => (
             <Link className="course-card" key={course.id} to={runPath(course.run_id)}>
-              <div className="card-meta"><span>未发布</span><span>{courseProgressLabel(course)}</span></div>
+              <div className="card-meta"><span className="status-pill">工作区</span><span>7 阶段</span></div>
               <h2>{course.title}</h2>
-              <p>课程 ID：<code>{course.id}</code></p>
-              <span className="course-link">查看课程内容</span>
+              <p>课程正在本地生成，可随时回到工作台继续处理。</p>
+              <div className="course-metrics">
+                <span>▱ {courseProgressLabel(course)}</span>
+                <span>♢ 持久化运行记录</span>
+              </div>
+              <span className="course-link">打开课程工作台 <b aria-hidden="true">›</b></span>
             </Link>
           ))}
+          {!draftsError && drafts.length === 0 && <div className="empty-card">
+            <p className="eyebrow">No courses yet</p>
+            <h2>从第一门课程开始</h2>
+            <p>定义主题、受众和生成约束，创建后会自动进入 Run 工作台。</p>
+            <Link className="text-link" to="/new">创建课程 →</Link>
+          </div>}
         </div>
       </section>
 
-      <h2>已发布示例</h2>
-      <section className="course-grid" aria-label="示例课程">
-        {courses.map((course) => <CourseCard key={course.slug} course={course} />)}
-      </section>
+      {courses.length > 0 && <section className="course-section" aria-label="示例课程">
+        <div className="section-heading">
+          <div><p className="eyebrow">Library</p><h2>已发布示例</h2></div>
+          <span>{courses.length} 门课程</span>
+        </div>
+        <div className="course-grid">
+          {courses.map((course) => <CourseCard key={course.slug} course={course} />)}
+        </div>
+      </section>}
     </>
   );
 }
@@ -98,13 +117,17 @@ function CourseCard({ course }: { course: Course }) {
   return (
     <article className="course-card">
       <div className="card-meta">
-        <span>{course.status}</span>
+        <span className="status-pill published">{course.status}</span>
         <span>{course.chapters} 章</span>
       </div>
       <h2>{course.title}</h2>
       <p>{course.description}</p>
+      <div className="course-metrics">
+        <span>▱ {course.chapters} 个 Markdown 章节</span>
+        <span>♢ {course.duration}</span>
+      </div>
       <a className="course-link" href={course.href}>
-        浏览已发布课程
+        打开课程工作台 <b aria-hidden="true">›</b>
       </a>
     </article>
   );
@@ -189,7 +212,8 @@ function LlmConfigDialog({ status, onClose, onUpdated }: {
 export function NewCoursePage() {
   const [searchParams] = useSearchParams();
   const legacyRunId = searchParams.get("run");
-  return legacyRunId ? <Navigate to={runPath(legacyRunId)} replace /> : <CourseWorkflowPage />;
+  return legacyRunId ? <Navigate to={runPath(legacyRunId)} replace />
+    : <CourseWorkflowPage openConfig={searchParams.get("config") === "open"} />;
 }
 
 
@@ -199,11 +223,14 @@ export function RunPage() {
 }
 
 
-function CourseWorkflowPage({ runId }: { runId?: string }) {
+function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; openConfig?: boolean }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [configOpen, setConfigOpen] = useState(false);
+  const [configOpen, setConfigOpen] = useState(openConfig);
   const configQuery = useQuery({ queryKey: ["llm-config"], queryFn: api.getLlmConfig });
+  useEffect(() => {
+    if (openConfig) setConfigOpen(true);
+  }, [openConfig]);
   const [input, setInput] = useState<CourseInput>({
     topic: "",
     audience: "",
@@ -352,6 +379,7 @@ function CourseWorkflowPage({ runId }: { runId?: string }) {
   const lengthFinding = run?.quality?.evidence_findings?.find(
     (finding) => finding.rule_id === "lesson.effective_chars.minimum",
   );
+  const creationAction = courseCreationAction(configQuery.data, busy);
 
   function start(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -374,16 +402,15 @@ function CourseWorkflowPage({ runId }: { runId?: string }) {
   return (
     <div className="run-page">
       <section className="page-intro">
-        <p className="eyebrow">Seven-stage V0</p>
+        <p className="eyebrow">{runId ? "Course workspace" : "New course"}</p>
         <h1>{runId ? contentQuery.data?.title ?? "课程详情" : "新建课程"}</h1>
-        <p>{runId ? "课程内容为草稿，尚未发布；下方保留执行与人工审批记录。" : "提交课程目标后，页面显示每一步的真实状态。准备发布需要人工决定；V0 不执行发布。"}</p>
-        <p>
-          DeepSeek：{configQuery.isPending ? "正在读取配置" : configQuery.data?.configured ?
-            `${configQuery.data.model} · 已保存本机` : "未配置"}
-          {" "}<button type="button" disabled={configQuery.isPending} onClick={() => {
-            setConfigOpen(true);
-          }}>配置 DeepSeek</button>
-        </p>
+        <p>{runId ? "在同一个工作台中审阅课程草稿、执行状态和人工决策。" : "先定义课程意图与生成边界，再启动可暂停、可恢复的七阶段 Run。"}</p>
+        <button className="config-inline" type="button" disabled={configQuery.isPending}
+          onClick={() => setConfigOpen(true)}>
+          <span className={`status-dot ${configQuery.data?.configured ? "ready" : ""}`} />
+          DeepSeek · {configQuery.isPending ? "读取中" : configQuery.data?.configured
+            ? `${configQuery.data.model} 已配置` : "需要配置"}
+        </button>
         {configQuery.data?.error && <p className="notice error">配置不可用，请重新保存或清除配置。</p>}
         {configQuery.isError && <p className="notice error">无法读取本机配置：{configQuery.error.message}</p>}
       </section>
@@ -396,18 +423,30 @@ function CourseWorkflowPage({ runId }: { runId?: string }) {
 
       {!runId && (
         <form className="course-form" onSubmit={start}>
-          <label>课程主题
-            <input required value={input.topic} onChange={(event) => setInput({ ...input, topic: event.target.value })} />
-          </label>
-          <label>目标受众
-            <input required value={input.audience} onChange={(event) => setInput({ ...input, audience: event.target.value })} />
-          </label>
+          <div className="form-section-heading"><span>01</span><div><h2>课程意图</h2><p>告诉 Agent 要为谁解决什么学习问题。</p></div></div>
+          <div className="form-grid">
+            <label>课程主题
+              <input required placeholder="例如：用 FastAPI 构建生产级 API"
+                value={input.topic} onChange={(event) => setInput({ ...input, topic: event.target.value })} />
+            </label>
+            <label>目标受众
+              <input required placeholder="例如：具备 Python 基础的后端开发者"
+                value={input.audience} onChange={(event) => setInput({ ...input, audience: event.target.value })} />
+            </label>
+          </div>
           <label>学习目标
-            <textarea required value={input.goal} onChange={(event) => setInput({ ...input, goal: event.target.value })} />
+            <textarea required placeholder="描述完成课程后，学习者能够独立完成什么。"
+              value={input.goal} onChange={(event) => setInput({ ...input, goal: event.target.value })} />
           </label>
+          <div className="form-section-heading">
+            <span>02</span>
+            <div>
+              <h2>生成约束</h2>
+              <p>章节数用于规划参考，不会硬性平均分配；有效字符会去除 Markdown、HTML 和空白。</p>
+            </div>
+          </div>
           <fieldset className="generation-constraints">
-            <legend>生成约束</legend>
-            <p>章节数用于规划；有效字符会去除 Markdown、HTML 和空白，代码内容仍计数。</p>
+            <legend className="visually-hidden">生成约束</legend>
             <div className="constraint-grid">
               <label>期望章节数
                 <input type="number" required min={1} max={100}
@@ -442,8 +481,12 @@ function CourseWorkflowPage({ runId }: { runId?: string }) {
               <small>达到阈值后允许当前节点提交，并在下一节点前终止。</small>
             </label>}
           </fieldset>
-          <p>语言：中文</p>
-          <button type="submit" disabled={busy || !canStartRun(configQuery.data)}>开始 Run</button>
+          <div className="form-submit">
+            <p><strong>输出语言</strong><br />中文 · 课程创建后立即进入七阶段工作流</p>
+            <button className="primary-action" type="submit" disabled={creationAction.disabled}>
+              <span aria-hidden="true">✦</span>{creationAction.label}
+            </button>
+          </div>
         </form>
       )}
 
