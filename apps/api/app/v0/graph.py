@@ -555,6 +555,16 @@ class WorkflowNodes:
         summary = self._quality_summary(run.quality, report)
         if any(item.status != "pass" for item in report.results):
             finding = report.findings[0] if report.findings else None
+            if finding and finding.rule_id == "lesson.effective_chars.minimum":
+                self.runner._mark_waiting(
+                    state.run_id,
+                    index,
+                    "lesson_effective_chars_below_minimum",
+                    summary,
+                    "system",
+                    quality_sources,
+                )
+                return {"current_node": "quality", "last_outcome": "waiting_for_human"}
             if finding is None or finding.category == "fact":
                 self.runner._mark_waiting(
                     state.run_id,
@@ -650,7 +660,18 @@ class WorkflowNodes:
         brief = run.blueprint.lessons[state.quality_cursor]
         lesson = self.runner._load_artifact(lesson_ref.artifact_id, lesson_ref.version)
         markdown = str(lesson.content["markdown"])
-        reports = [check_markdown(markdown, lesson_ref, brief.lesson_id)]
+        reports = [
+            check_markdown(
+                markdown,
+                lesson_ref,
+                brief.lesson_id,
+                min_effective_chars=(
+                    run.course_input.min_effective_chars
+                    if run.constraints_version == 1
+                    else None
+                ),
+            )
+        ]
         if reports[-1].findings:
             return reports[-1]
         pack = self.context.for_reviewer(

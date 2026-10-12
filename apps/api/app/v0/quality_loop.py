@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from hashlib import sha256
+import re
 
 from pydantic import ValidationError
 
@@ -20,13 +21,32 @@ from app.v0.schemas import (
 GATE_ORDER = ("deterministic", "rubric", "humanizer")
 
 
+def effective_character_count(markdown: str) -> int:
+    """Count visible lesson characters while preserving fenced code content."""
+    text = re.sub(r"(?m)^[ \t]*(?:```|~~~).*$", "", markdown)
+    text = re.sub(r"<[^>]*>", "", text)
+    text = re.sub(r"!?\[([^]]*)\]\([^)]*\)", r"\1", text)
+    text = re.sub(
+        r"(?m)^[ \t]*(?:#{1,6}[ \t]+|>[ \t]?|[-+*][ \t]+|\d+[.)][ \t]+)",
+        "",
+        text,
+    )
+    text = re.sub(r"[*_~`]", "", text)
+    return len(re.sub(r"\s+", "", text))
+
+
 @dataclass(frozen=True)
 class GateReport:
     results: list[GateResult]
     findings: list[Finding]
 
 
-def check_markdown(markdown: str, reference: ArtifactRef, lesson_id: str) -> GateReport:
+def check_markdown(
+    markdown: str,
+    reference: ArtifactRef,
+    lesson_id: str,
+    min_effective_chars: int | None = None,
+) -> GateReport:
     """Check only syntax facts that are repeatable without a model."""
     lines = markdown.splitlines()
     problems: list[tuple[str, int, str, str]] = []
@@ -80,6 +100,40 @@ def check_markdown(markdown: str, reference: ArtifactRef, lesson_id: str) -> Gat
                 status="pass",
                 rule_id="markdown.structure",
                 evidence="一级标题与代码围栏结构通过",
+                artifact_ref=reference,
+            )
+        )
+    actual_chars = effective_character_count(markdown)
+    if min_effective_chars is not None and actual_chars < min_effective_chars:
+        rule_id = "lesson.effective_chars.minimum"
+        findings.append(
+            Finding(
+                finding_id=sha256(
+                    f"{reference.run_id}:{reference.artifact_id}:{reference.version}:"
+                    f"{rule_id}".encode()
+                ).hexdigest()[:16],
+                run_id=reference.run_id,
+                gate="deterministic",
+                rule_id=rule_id,
+                artifact_ref=reference,
+                location=FindingLocation(
+                    lesson_id=lesson_id,
+                    line_start=1,
+                    line_end=max(1, len(lines)),
+                    excerpt_hash=sha256(markdown.encode()).hexdigest(),
+                ),
+                category="structure",
+                severity="blocker",
+                evidence=f"当前有效字符数为 {actual_chars}",
+                expected=f"有效字符数至少为 {min_effective_chars}",
+            )
+        )
+        results.append(
+            GateResult(
+                gate="deterministic",
+                status="fail",
+                rule_id=rule_id,
+                evidence=f"{actual_chars}/{min_effective_chars}",
                 artifact_ref=reference,
             )
         )

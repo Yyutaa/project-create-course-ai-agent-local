@@ -172,6 +172,40 @@ def test_blueprint_chapter_count_outlier_waits_before_batch_plan(tmp_path):
     )
 
 
+def test_short_lesson_waits_for_human_without_auto_repair(tmp_path):
+    provider = MultiLessonProvider(lesson_count=1)
+    store = FactStore(tmp_path / "facts.sqlite3")
+    runner = V0Runner(provider, store=store)
+    created = runner.create(
+        CourseInput(
+            topic="Python 基础",
+            audience="初学者",
+            goal="完成练习",
+            language="zh",
+            expected_chapters=1,
+            min_effective_chars=20,
+        ),
+        request_key="short-lesson",
+    )
+    with store.connect() as connection:
+        connection.execute(
+            "UPDATE runs SET mission_review_required=0 WHERE id=?", (created.id,)
+        )
+
+    runner.execute(created.id)
+
+    run = runner.get(created.id)
+    assert run.status == "waiting_for_human"
+    assert run.stages[5].failure_reason == "lesson_effective_chars_below_minimum"
+    assert run.quality is not None
+    assert run.quality.repair_tasks == []
+    assert any(
+        item.rule_id == "lesson.effective_chars.minimum"
+        for item in run.quality.evidence_findings
+    )
+    assert not any(item.producer_role == "repair" for item in run.artifacts)
+
+
 def state(**updates):
     return GraphState(run_id="run-1").model_copy(update=updates)
 

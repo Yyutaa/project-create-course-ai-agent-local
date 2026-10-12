@@ -5,6 +5,7 @@ from app.v0.quality_loop import (
     GATE_ORDER,
     apply_repair,
     check_markdown,
+    effective_character_count,
     make_repair_task,
     review_gate,
 )
@@ -27,8 +28,17 @@ from app.v0.schemas import (
 
 def execute_legacy(runner: V0Runner, run_id: str) -> None:
     # Quality-loop fixtures represent pre-gate Runs; Mission gate is tested separately.
+    run = runner.get(run_id)
+    run.constraints_version = 0
     with runner.store.connect() as connection:
-        connection.execute("UPDATE runs SET mission_review_required=0 WHERE id=?", (run_id,))
+        connection.execute(
+            "UPDATE runs SET mission_review_required=0, constraints_version=0 WHERE id=?",
+            (run_id,),
+        )
+        connection.execute(
+            "UPDATE snapshots SET projection_json=? WHERE run_id=?",
+            (run.model_dump_json(), run_id),
+        )
     runner.execute(run_id)
 
 
@@ -94,6 +104,33 @@ def test_markdown_structure_passes_valid_minimal_lesson():
     report = check_markdown("# 标题\n\n正文。", LESSON_REF, "lesson-1")
     assert report.results[0].status == "pass"
     assert report.findings == []
+
+
+def test_effective_count_strips_markup_and_whitespace_but_keeps_code():
+    markdown = (
+        "# 标题\r\n\r\n<strong>正文</strong>\r\n"
+        "- **列表**与[链接](https://example.com)\r\n"
+        "```py\r\nprint(1)\r\n```"
+    )
+    assert effective_character_count(markdown) == len("标题正文列表与链接print(1)")
+
+
+def test_effective_character_minimum_creates_blocking_finding():
+    report = check_markdown(
+        "# 标题\n\n正文",
+        LESSON_REF,
+        "lesson-1",
+        min_effective_chars=20,
+    )
+    finding = next(
+        item
+        for item in report.findings
+        if item.rule_id == "lesson.effective_chars.minimum"
+    )
+    assert finding.category == "structure"
+    assert finding.severity == "blocker"
+    assert "4" in finding.evidence
+    assert "20" in finding.expected
 
 
 class GateProvider(FakeProvider):
