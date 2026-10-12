@@ -16,12 +16,77 @@ def test_migration_is_repeatable_and_preserves_rows(tmp_path):
             ("c1", "第一门课", "c1", "2026-09-22T00:00:00Z"),
         )
     store.migrate()
-    assert store.schema_version() == 7
+    assert store.schema_version() == 8
     with store.connect() as connection:
         assert (
             connection.execute("SELECT title FROM courses WHERE id='c1'").fetchone()[0]
             == "第一门课"
         )
+
+
+def test_v7_migration_preserves_legacy_run_without_enabling_constraints(tmp_path):
+    path = tmp_path / "facts.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE runs (id TEXT PRIMARY KEY)")
+        connection.execute(
+            "CREATE TABLE intakes (run_id TEXT PRIMARY KEY, topic TEXT NOT NULL, "
+            "audience TEXT NOT NULL, goal TEXT NOT NULL, language TEXT NOT NULL)"
+        )
+        connection.execute("INSERT INTO runs VALUES ('legacy-run')")
+        connection.execute(
+            "INSERT INTO intakes VALUES "
+            "('legacy-run', 'Python', '初学者', '完成练习', 'zh')"
+        )
+        connection.execute("PRAGMA user_version=7")
+
+    store = storage.FactStore(path)
+    store.migrate()
+    store.migrate()
+
+    assert store.schema_version() == 8
+    with store.connect() as connection:
+        run = connection.execute(
+            "SELECT constraints_version FROM runs WHERE id='legacy-run'"
+        ).fetchone()
+        intake = connection.execute(
+            "SELECT expected_chapters, min_effective_chars, token_limit "
+            "FROM intakes WHERE run_id='legacy-run'"
+        ).fetchone()
+    assert run[0] == 0
+    assert tuple(intake) == (12, 12_000, None)
+
+
+def test_new_run_constraints_survive_snapshot_rebuild_and_affect_idempotency(tmp_path):
+    store = storage.FactStore(tmp_path / "facts.sqlite3")
+    store.migrate()
+    course = storage.CourseInput(
+        topic="React",
+        audience="初学者",
+        goal="完成页面",
+        language="zh",
+        expected_chapters=8,
+        min_effective_chars=6_000,
+        token_limit=50_000,
+    )
+    run, _ = store.create_run(course, "constraint-run")
+    replay, created = store.create_run(course, "constraint-run")
+
+    assert not created
+    assert replay.id == run.id
+    with pytest.raises(ValueError, match="Idempotency-Key"):
+        store.create_run(
+            course.model_copy(update={"expected_chapters": 9}),
+            "constraint-run",
+        )
+
+    with store.connect() as connection:
+        connection.execute("DELETE FROM snapshots WHERE run_id=?", (run.id,))
+    rebuilt = store.get_run(run.id)
+
+    assert rebuilt.constraints_version == 1
+    assert rebuilt.course_input.expected_chapters == 8
+    assert rebuilt.course_input.min_effective_chars == 6_000
+    assert rebuilt.course_input.token_limit == 50_000
 
 
 def test_foreign_keys_and_transaction_rollback(tmp_path):
@@ -65,7 +130,7 @@ def test_migration_upgrades_v1_artifacts_without_inventing_provenance(tmp_path):
     store = storage.FactStore(path)
     store.migrate()
 
-    assert store.schema_version() == 7
+    assert store.schema_version() == 8
     with store.connect() as connection:
         columns = {
             row[1] for row in connection.execute("PRAGMA table_info(artifacts)").fetchall()
@@ -152,7 +217,7 @@ def test_v2_database_upgrades_to_execution_protocol_without_recreating_runs(tmp_
     store.migrate()
 
     with store.connect() as connection:
-        assert store.schema_version() == 7
+        assert store.schema_version() == 8
         assert connection.execute("SELECT id FROM runs").fetchone()[0] == "existing-run"
         assert connection.execute(
             "SELECT mission_review_required FROM runs WHERE id='existing-run'"

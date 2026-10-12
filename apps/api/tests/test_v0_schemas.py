@@ -38,6 +38,28 @@ def test_course_input_rejects_blank_fields():
             CourseInput(**{**VALID_INPUT, field: "   "})
 
 
+def test_course_input_has_generation_constraint_defaults():
+    value = CourseInput(**VALID_INPUT)
+
+    assert value.expected_chapters == 12
+    assert value.min_effective_chars == 12_000
+    assert value.token_limit is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("expected_chapters", 0),
+        ("expected_chapters", 101),
+        ("min_effective_chars", 0),
+        ("token_limit", 0),
+    ],
+)
+def test_course_input_rejects_invalid_generation_constraints(field, value):
+    with pytest.raises(ValidationError):
+        CourseInput.model_validate({**VALID_INPUT, field: value})
+
+
 def test_run_starts_with_exactly_seven_pending_stages():
     run = V0Run(id="run-1", course_input=CourseInput(**VALID_INPUT))
 

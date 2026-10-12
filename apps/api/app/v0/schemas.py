@@ -79,6 +79,9 @@ class CourseInput(BaseModel):
     audience: NonEmptyText
     goal: NonEmptyText
     language: Literal["zh"]
+    expected_chapters: int = Field(default=12, ge=1, le=100)
+    min_effective_chars: int = Field(default=12_000, gt=0)
+    token_limit: int | None = Field(default=None, gt=0)
 
 
 class StageRecord(BaseModel):
@@ -322,6 +325,7 @@ class V0Run(BaseModel):
     id: str
     course_id: str | None = None
     course_input: CourseInput
+    constraints_version: int = Field(default=0, ge=0, le=1)
     revision: int = 0
     artifacts: list[ArtifactSummary] = Field(default_factory=list)
     status: RunStatus = "running"
