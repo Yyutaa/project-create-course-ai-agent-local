@@ -252,25 +252,36 @@ class FactStore:
         if connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'"
         ).fetchone():
-            connection.execute(
-                "ALTER TABLE runs ADD COLUMN constraints_version "
-                "INTEGER NOT NULL DEFAULT 0 CHECK(constraints_version IN (0, 1))"
-            )
+            run_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(runs)")
+            }
+            if "constraints_version" not in run_columns:
+                connection.execute(
+                    "ALTER TABLE runs ADD COLUMN constraints_version "
+                    "INTEGER NOT NULL DEFAULT 0 CHECK(constraints_version IN (0, 1))"
+                )
         if connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='intakes'"
         ).fetchone():
-            connection.execute(
-                "ALTER TABLE intakes ADD COLUMN expected_chapters "
-                "INTEGER NOT NULL DEFAULT 12 CHECK(expected_chapters BETWEEN 1 AND 100)"
-            )
-            connection.execute(
-                "ALTER TABLE intakes ADD COLUMN min_effective_chars "
-                "INTEGER NOT NULL DEFAULT 12000 CHECK(min_effective_chars > 0)"
-            )
-            connection.execute(
-                "ALTER TABLE intakes ADD COLUMN token_limit "
-                "INTEGER CHECK(token_limit IS NULL OR token_limit > 0)"
-            )
+            intake_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(intakes)")
+            }
+            if "expected_chapters" not in intake_columns:
+                connection.execute(
+                    "ALTER TABLE intakes ADD COLUMN expected_chapters "
+                    "INTEGER NOT NULL DEFAULT 12 "
+                    "CHECK(expected_chapters BETWEEN 1 AND 100)"
+                )
+            if "min_effective_chars" not in intake_columns:
+                connection.execute(
+                    "ALTER TABLE intakes ADD COLUMN min_effective_chars "
+                    "INTEGER NOT NULL DEFAULT 12000 CHECK(min_effective_chars > 0)"
+                )
+            if "token_limit" not in intake_columns:
+                connection.execute(
+                    "ALTER TABLE intakes ADD COLUMN token_limit "
+                    "INTEGER CHECK(token_limit IS NULL OR token_limit > 0)"
+                )
         connection.execute("PRAGMA user_version=8")
 
     def mission_review_required(self, run_id: str) -> bool:

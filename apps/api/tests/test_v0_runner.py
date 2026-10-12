@@ -18,8 +18,18 @@ COURSE = CourseInput(
 def execute_legacy(runner: V0Runner, run_id: str) -> None:
     # Preserve downstream runner assertions for pre-migration Runs.
     if runner.store is not None:
+        run = runner.get(run_id)
+        run.constraints_version = 0
         with runner.store.connect() as connection:
-            connection.execute("UPDATE runs SET mission_review_required=0 WHERE id=?", (run_id,))
+            connection.execute(
+                "UPDATE runs SET mission_review_required=0, constraints_version=0 "
+                "WHERE id=?",
+                (run_id,),
+            )
+            connection.execute(
+                "UPDATE snapshots SET projection_json=? WHERE run_id=?",
+                (run.model_dump_json(), run_id),
+            )
     runner.execute(run_id)
 
 

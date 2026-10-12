@@ -495,6 +495,9 @@ function CourseWorkflowPage({ runId }: { runId?: string }) {
             {lengthFinding && <p role="alert">
               单章有效字符不足：{lengthFinding.evidence}；{lengthFinding.expected}
             </p>}
+            {chapterDeviation && run.blueprint && <p role="alert">
+              章节数偏差：期望 {run.course_input.expected_chapters} 章，实际 {run.blueprint.lessons.length} 章。
+            </p>}
             {tokenTerminated && <p role="alert">Token 阈值已终止本次 Run，不能继续或修订。</p>}
             <ul>
               {(executionQuery.data?.commands ?? []).map((command) => (
