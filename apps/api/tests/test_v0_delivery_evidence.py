@@ -63,6 +63,165 @@ def test_trace_reports_broken_command_reference(tmp_path):
     assert "provider_call:call-broken:missing_command" in evidence.integrity_issues
 
 
+def test_constraint_finding_with_missing_artifact_reports_integrity_issue(tmp_path):
+    from app.v0.delivery import DeliveryStore
+    from app.v0.schemas import Finding, FindingLocation, QualitySummary
+
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        CourseInput(topic="变量", audience="初学者", goal="解释变量", language="zh"),
+        "missing-finding-artifact",
+    )
+    missing_ref = ArtifactRef(
+        run_id=run.id,
+        artifact_id="missing-lesson",
+        version=1,
+        kind="lesson",
+        content_hash="missing-hash",
+    )
+    finding = Finding(
+        finding_id="missing-finding",
+        run_id=run.id,
+        gate="deterministic",
+        rule_id="lesson.effective_chars.minimum",
+        artifact_ref=missing_ref,
+        location=FindingLocation(
+            lesson_id="lesson-1",
+            line_start=1,
+            line_end=1,
+            excerpt_hash="excerpt-hash",
+        ),
+        category="structure",
+        severity="blocker",
+        evidence="当前有效字符数为 1",
+        expected="有效字符数至少为 12000",
+    )
+    quality = QualitySummary(
+        status="manual_review",
+        checks=["deterministic:lesson.effective_chars.minimum:fail"],
+        language_risk="表达 Gate 尚未通过",
+        limitations=["测试"],
+        evidence_findings=[finding],
+    )
+    run.quality = quality
+    facts.record(
+        run,
+        "artifact.created",
+        "quality",
+        artifact=quality,
+        producer_role="system",
+        source_refs=[missing_ref],
+    )
+
+    evidence = DeliveryStore(facts.path).read(run.id)
+
+    assert evidence.findings[0].actual_value is None
+    assert "finding:missing-finding:missing_artifact" in evidence.integrity_issues
+
+
+@pytest.mark.parametrize(
+    ("content_json", "issue"),
+    [
+        ("{}", "invalid_lesson_content"),
+        ("{", "invalid_json"),
+    ],
+)
+def test_constraint_finding_with_malformed_lesson_stays_readable(
+    tmp_path, content_json, issue
+):
+    from app.v0.delivery import DeliveryStore
+    from app.v0.quality_loop import check_markdown
+    from app.v0.schemas import LessonDraft, QualitySummary
+
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        CourseInput(topic="变量", audience="初学者", goal="解释变量", language="zh"),
+        f"malformed-lesson-{issue}",
+    )
+    lesson = LessonDraft(title="变量", markdown="# 变量\n\n正文", lesson_id="lesson-1")
+    facts.record(run, "artifact.created", "generation", artifact=lesson)
+    current = facts.get_run(run.id)
+    summary = next(item for item in current.artifacts if item.kind == "lesson")
+    lesson_ref = ArtifactRef(
+        run_id=run.id,
+        artifact_id=summary.artifact_id,
+        version=summary.version,
+        kind="lesson",
+        content_hash=summary.content_hash,
+    )
+    report = check_markdown(
+        lesson.markdown, lesson_ref, "lesson-1", min_effective_chars=12_000
+    )
+    quality = QualitySummary(
+        status="manual_review",
+        checks=["deterministic:lesson.effective_chars.minimum:fail"],
+        language_risk="表达 Gate 尚未通过",
+        limitations=["测试"],
+        evidence_findings=report.findings,
+    )
+    current.quality = quality
+    facts.record(current, "artifact.created", "quality", artifact=quality)
+    with facts.connect() as connection:
+        connection.execute(
+            "UPDATE artifacts SET content_json=? WHERE artifact_id=? AND version=?",
+            (content_json, lesson_ref.artifact_id, lesson_ref.version),
+        )
+
+    evidence = DeliveryStore(facts.path).read(run.id)
+
+    assert evidence.findings[0].actual_value is None
+    assert any(item.endswith(issue) for item in evidence.integrity_issues)
+
+
+def test_constraint_event_with_malformed_blueprint_stays_readable(tmp_path):
+    from app.v0.delivery import DeliveryStore
+    from app.v0.schemas import BlueprintDraft, BlueprintLesson
+
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        CourseInput(topic="变量", audience="初学者", goal="解释变量", language="zh"),
+        "malformed-blueprint",
+    )
+    blueprint = BlueprintDraft(lessons=[BlueprintLesson(
+        title="变量",
+        learning_goal="解释变量",
+        evidence="完成练习",
+    )])
+    facts.record(run, "artifact.created", "blueprint", artifact=blueprint)
+    current = facts.get_run(run.id)
+    summary = next(item for item in current.artifacts if item.kind == "blueprint")
+    blueprint_ref = ArtifactRef(
+        run_id=run.id,
+        artifact_id=summary.artifact_id,
+        version=summary.version,
+        kind="blueprint",
+        content_hash=summary.content_hash,
+    )
+    facts.record(
+        current,
+        "blueprint.chapter_count_observed",
+        "batch_plan",
+        accepted_ref=blueprint_ref,
+    )
+    with facts.connect() as connection:
+        connection.execute(
+            "UPDATE artifacts SET content_json='{}' "
+            "WHERE artifact_id=? AND version=?",
+            (blueprint_ref.artifact_id, blueprint_ref.version),
+        )
+
+    evidence = DeliveryStore(facts.path).read(run.id)
+
+    assert evidence.constraint_events[0].actual_value is None
+    assert any(
+        item.endswith("invalid_blueprint_content")
+        for item in evidence.integrity_issues
+    )
+
+
 def test_recovery_and_human_paths_are_indexed_from_durable_facts(tmp_path):
     from app.v0.delivery import DeliveryStore
 

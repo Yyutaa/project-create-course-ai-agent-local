@@ -27,12 +27,16 @@ def effective_character_count(markdown: str) -> int:
     code_chars = 0
     fence_marker = None
     for line in markdown.splitlines():
-        marker = re.match(r"^[ \t]*(`{3,}|~{3,})", line)
-        if marker and (
-            fence_marker is None or marker.group(1)[0] == fence_marker
-        ):
-            fence_marker = None if fence_marker else marker.group(1)[0]
-            continue
+        if fence_marker is None:
+            marker = re.match(r"^[ \t]*(`{3,}|~{3,})", line)
+            if marker:
+                fence_marker = (marker.group(1)[0], len(marker.group(1)))
+                continue
+        else:
+            marker, minimum = fence_marker
+            if re.fullmatch(rf"[ \t]*{re.escape(marker)}{{{minimum},}}[ \t]*", line):
+                fence_marker = None
+                continue
         if fence_marker:
             code_chars += len(re.sub(r"\s+", "", line))
         else:

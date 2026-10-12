@@ -561,14 +561,7 @@ class WorkflowNodes:
         report = self._evaluate(state, lesson_ref)
         summary = self._quality_summary(run.quality, report)
         if any(item.status != "pass" for item in report.results):
-            character_finding = next(
-                (
-                    item
-                    for item in report.findings
-                    if item.rule_id == "lesson.effective_chars.minimum"
-                ),
-                None,
-            )
+            character_finding = self._character_finding(report.findings)
             if character_finding is not None:
                 self.runner._mark_waiting(
                     state.run_id,
@@ -659,6 +652,13 @@ class WorkflowNodes:
                     if cursor == len(run.blueprint.lessons) else "more_lessons"
                 ),
             }
+        brief = run.blueprint.lessons[state.quality_cursor]
+        lesson_ref = self._ref(state, f"lesson:{brief.lesson_id}")
+        if self._character_finding(run.quality.evidence_findings, lesson_ref):
+            self.runner._mark_waiting(
+                state.run_id, 5, "lesson_effective_chars_below_minimum"
+            )
+            return {"current_node": "quality", "last_outcome": "waiting_for_human"}
         finding = run.quality.evidence_findings[-1] if run.quality.evidence_findings else None
         if finding is None or not self._has_repair_budget(state, finding.finding_id):
             raise GraphRouteError("Quality checkpoint 缺少可恢复 Finding")
@@ -760,6 +760,18 @@ class WorkflowNodes:
         return (
             state.loop_counts.repair_attempts < 3
             and state.loop_counts.finding_attempts.get(finding_id, 0) < 2
+        )
+
+    @staticmethod
+    def _character_finding(findings, reference=None):
+        return next(
+            (
+                item
+                for item in findings
+                if item.rule_id == "lesson.effective_chars.minimum"
+                and (reference is None or item.artifact_ref == reference)
+            ),
+            None,
         )
 
     def _repair(self, state: GraphState, index: int) -> dict:
@@ -942,6 +954,16 @@ class WorkflowNodes:
             }
         if prior_decision != "candidate.rejected":
             self.runner._reject_repair_candidate(state.run_id, candidate_ref)
+        if self._character_finding(report.findings) is not None:
+            self.runner._mark_waiting(
+                state.run_id,
+                index,
+                "lesson_effective_chars_below_minimum",
+                summary,
+                "system",
+                verification_sources,
+            )
+            return {"current_node": "verification", "last_outcome": "waiting_for_human"}
         finding = report.findings[0] if report.findings else None
         if finding is None or not self._has_repair_budget(state, state.active_finding_id):
             self.runner._mark_waiting(
@@ -997,6 +1019,16 @@ class WorkflowNodes:
                 "artifact_refs": refs,
                 "quality_cursor": cursor,
                 "active_finding_id": None,
+            }
+        if self._character_finding(
+            run.quality.evidence_findings, candidate_ref
+        ) is not None:
+            self.runner._mark_waiting(
+                state.run_id, 5, "lesson_effective_chars_below_minimum"
+            )
+            return {
+                "current_node": "verification",
+                "last_outcome": "waiting_for_human",
             }
         return {
             "current_node": "verification",

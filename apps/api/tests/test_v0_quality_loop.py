@@ -121,6 +121,25 @@ def test_effective_count_keeps_markdown_and_html_symbols_inside_fenced_code():
     assert effective_character_count(markdown) == len("标题a*b<T>`x`_value_")
 
 
+@pytest.mark.parametrize(
+    ("markdown", "visible"),
+    [
+        (
+            "# 标题\n\n````py\n```not-a-close\nvalue\n````",
+            "标题```not-a-closevalue",
+        ),
+        (
+            "# 标题\n\n~~~txt\n~~~not-a-close\nvalue\n~~~",
+            "标题~~~not-a-closevalue",
+        ),
+    ],
+)
+def test_effective_count_only_closes_fence_with_valid_closing_line(
+    markdown, visible
+):
+    assert effective_character_count(markdown) == len(visible)
+
+
 def test_effective_character_minimum_creates_blocking_finding():
     report = check_markdown(
         "# 标题\n\n正文",

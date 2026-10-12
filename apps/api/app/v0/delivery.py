@@ -165,22 +165,49 @@ class DeliveryStore:
             ).fetchall()
         findings: dict[str, TraceFinding] = {}
         verifications: list[TraceVerification] = []
-        artifact_contents = {
-            (row["artifact_id"], row["version"]): json.loads(row["content_json"])
-            for row in artifacts
-        }
+        artifact_contents = {}
+        artifact_issues = []
+        for row in artifacts:
+            key = (row["artifact_id"], row["version"])
+            try:
+                content = json.loads(row["content_json"])
+            except (json.JSONDecodeError, TypeError):
+                artifact_issues.append(
+                    f"artifact:{row['artifact_id']}:{row['version']}:invalid_json"
+                )
+                continue
+            if not isinstance(content, dict):
+                artifact_issues.append(
+                    f"artifact:{row['artifact_id']}:{row['version']}:invalid_content"
+                )
+                continue
+            artifact_contents[key] = content
         quality_artifacts = [row for row in artifacts if row["kind"] == "quality"]
         for artifact in quality_artifacts[-1:]:
-            content = json.loads(artifact["content_json"])
+            content = artifact_contents.get(
+                (artifact["artifact_id"], artifact["version"])
+            )
+            if content is None:
+                continue
             for finding in content.get("evidence_findings", []):
                 ref = finding["artifact_ref"]
                 location = finding["location"]
                 expected_value = None
                 actual_value = None
                 if finding["rule_id"] == "lesson.effective_chars.minimum":
-                    lesson = artifact_contents[(ref["artifact_id"], ref["version"])]
                     expected_value = run["min_effective_chars"]
-                    actual_value = effective_character_count(lesson["markdown"])
+                    lesson = artifact_contents.get(
+                        (ref["artifact_id"], ref["version"])
+                    )
+                    if lesson is not None:
+                        markdown = lesson.get("markdown")
+                        if isinstance(markdown, str):
+                            actual_value = effective_character_count(markdown)
+                        else:
+                            artifact_issues.append(
+                                f"artifact:{ref['artifact_id']}:{ref['version']}:"
+                                "invalid_lesson_content"
+                            )
                 findings[finding["finding_id"]] = TraceFinding(
                     id=finding["finding_id"], gate=finding["gate"],
                     rule_id=safe_rule_id(finding["rule_id"]),
@@ -210,7 +237,7 @@ class DeliveryStore:
         artifact_versions = {
             (row["artifact_id"], row["version"]) for row in artifacts
         }
-        issues = []
+        issues = list(dict.fromkeys(artifact_issues))
         issues.extend(
             f"node:{row['id']}:missing_command"
             for row in nodes
@@ -271,7 +298,17 @@ class DeliveryStore:
                 blueprint = artifact_contents.get(
                     (row["artifact_id"], row["artifact_version"])
                 )
-                actual_value = len(blueprint["lessons"]) if blueprint else None
+                if blueprint is not None:
+                    lessons = blueprint.get("lessons")
+                    if isinstance(lessons, list):
+                        actual_value = len(lessons)
+                    else:
+                        issue = (
+                            f"artifact:{row['artifact_id']}:"
+                            f"{row['artifact_version']}:invalid_blueprint_content"
+                        )
+                        if issue not in issues:
+                            issues.append(issue)
             elif row["type"] == "budget.token_exhausted":
                 expected_value = run["token_limit"]
                 actual_value = tokens_used

@@ -14,8 +14,10 @@ from app.v0.graph import (
 from app.v0.batching import assign_blueprint_ids, build_batch_plan
 from app.v0.provider import FakeProvider
 from app.v0.provider import AgentResponse, ProviderError
+from app.v0.quality_loop import check_markdown
 from app.v0.runner import V0Runner
 from app.v0.schemas import (
+    ArtifactRef,
     BlueprintDraft,
     BlueprintLesson,
     CourseInput,
@@ -220,6 +222,137 @@ def test_short_lesson_waits_for_human_without_auto_repair(tmp_path):
         for item in run.quality.evidence_findings
     )
     assert not any(item.producer_role == "repair" for item in run.artifacts)
+
+
+def test_verification_character_shortage_waits_without_second_repair(tmp_path):
+    class ShortCandidateProvider(MultiLessonProvider):
+        def __init__(self):
+            super().__init__(lesson_count=1)
+            self.repair_requests = []
+
+        def invoke(self, request):
+            response = super().invoke(request)
+            if request.role == "writer":
+                response.payload["markdown"] = "正文" * 10
+            elif request.role == "repair":
+                self.repair_requests.append(request)
+                response.payload["markdown"] = "# 短"
+            return response
+
+    provider = ShortCandidateProvider()
+    runner = V0Runner(provider, store=FactStore(tmp_path / "facts.sqlite3"))
+    run = runner.create(
+        CourseInput(
+            topic="Python",
+            audience="初学者",
+            goal="完成练习",
+            language="zh",
+            expected_chapters=1,
+            min_effective_chars=20,
+        ),
+        request_key="short-verification-candidate",
+    )
+    with runner.store.connect() as connection:
+        connection.execute(
+            "UPDATE runs SET mission_review_required=0 WHERE id=?", (run.id,)
+        )
+
+    runner.execute(run.id)
+
+    result = runner.get(run.id)
+    assert result.status == "waiting_for_human"
+    assert result.stages[5].failure_reason == "lesson_effective_chars_below_minimum"
+    assert len(provider.repair_requests) == 1
+
+
+def test_recover_quality_keeps_character_shortage_out_of_repair():
+    runner = V0Runner(FakeProvider())
+    run = runner.create(COURSE)
+    lesson_ref = ArtifactRef(
+        run_id=run.id,
+        artifact_id="lesson-1",
+        version=1,
+        kind="lesson",
+        content_hash="lesson-hash",
+    )
+    quality_ref = ArtifactRef(
+        run_id=run.id,
+        artifact_id="quality-1",
+        version=1,
+        kind="quality",
+        content_hash="quality-hash",
+    )
+    report = check_markdown(
+        "# 短", lesson_ref, "lesson-1", min_effective_chars=20
+    )
+    current = runner._runs[run.id]
+    current.blueprint = BlueprintDraft(lessons=[BlueprintLesson(
+        title="一章",
+        learning_goal="完成练习",
+        evidence="提交结果",
+        lesson_id="lesson-1",
+    )])
+    current.quality = WorkflowNodes._quality_summary(None, report)
+    state = GraphState(
+        run_id=run.id,
+        current_node="quality",
+        artifact_refs={
+            "lesson:lesson-1": lesson_ref,
+            "quality": quality_ref,
+        },
+    )
+
+    result = WorkflowNodes(runner).recover_quality(state, {
+        "type": "artifact.created",
+        "artifact_id": quality_ref.artifact_id,
+        "artifact_version": quality_ref.version,
+    })
+
+    assert result["last_outcome"] == "waiting_for_human"
+    assert runner.get(run.id).stages[5].failure_reason == (
+        "lesson_effective_chars_below_minimum"
+    )
+
+
+def test_recover_verification_keeps_character_shortage_out_of_repair():
+    runner = V0Runner(FakeProvider())
+    run = runner.create(COURSE)
+    candidate_ref = ArtifactRef(
+        run_id=run.id,
+        artifact_id="lesson-1",
+        version=2,
+        kind="lesson",
+        content_hash="candidate-hash",
+    )
+    quality_ref = ArtifactRef(
+        run_id=run.id,
+        artifact_id="quality-1",
+        version=2,
+        kind="quality",
+        content_hash="quality-hash",
+    )
+    report = check_markdown(
+        "# 短", candidate_ref, "lesson-1", min_effective_chars=20
+    )
+    current = runner._runs[run.id]
+    current.quality = WorkflowNodes._quality_summary(None, report)
+    state = GraphState(
+        run_id=run.id,
+        current_node="verification",
+        active_finding_id="original-finding",
+        artifact_refs={"candidate": candidate_ref, "quality": quality_ref},
+    )
+
+    result = WorkflowNodes(runner).recover_verification(state, {
+        "type": "artifact.created",
+        "artifact_id": quality_ref.artifact_id,
+        "artifact_version": quality_ref.version,
+    })
+
+    assert result["last_outcome"] == "waiting_for_human"
+    assert runner.get(run.id).stages[5].failure_reason == (
+        "lesson_effective_chars_below_minimum"
+    )
 
 
 def state(**updates):
