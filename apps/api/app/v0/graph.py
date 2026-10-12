@@ -302,6 +302,7 @@ class WorkflowNodes:
         }
 
     def _blueprint(self, state: GraphState, index: int) -> dict:
+        run = self.runner.get(state.run_id)
         mission_ref = self._ref(state, "mission")
         if self.runner.store and self.runner.store.mission_review_required(state.run_id):
             review = self.runner.store.latest_mission_review(state.run_id)
@@ -311,7 +312,15 @@ class WorkflowNodes:
                 or review["content_hash"] != mission_ref.content_hash
             ):
                 raise GraphRouteError("Blueprint 缺少当前 Mission 版本的人工确认")
-        pack = self.context.for_blueprint(state.run_id, mission_ref)
+        pack = self.context.for_blueprint(
+            state.run_id,
+            mission_ref,
+            expected_chapters=(
+                run.course_input.expected_chapters
+                if run.constraints_version == 1
+                else None
+            ),
+        )
         candidate = self.runner.executor.invoke(
             "blueprint", state.run_id, inputs=pack.inputs
         )
@@ -435,6 +444,11 @@ class WorkflowNodes:
                 batch_plan_ref,
                 lesson_index=lesson_index,
                 previous_lesson_ref=previous_ref,
+                min_effective_chars=(
+                    run.course_input.min_effective_chars
+                    if run.constraints_version == 1
+                    else None
+                ),
             )
             candidate = self.runner.executor.invoke(
                 "writer", state.run_id, inputs=pack.inputs

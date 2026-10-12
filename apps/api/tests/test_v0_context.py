@@ -129,12 +129,20 @@ def test_mission_pack_contains_only_intake():
 def test_blueprint_pack_contains_mission_and_explicit_empty_source_summary():
     builder, records = fixture_builder()
 
-    pack = builder.for_blueprint("run-1", reference(records["mission"]))
+    pack = builder.for_blueprint(
+        "run-1",
+        reference(records["mission"]),
+        expected_chapters=12,
+    )
 
     assert [item.kind for item in pack.inputs] == ["mission"]
     assert pack.inputs[0].content["mission"]["learning_goal"] == "完成四章练习"
     assert pack.inputs[0].content["source_summaries"] == []
     assert "未提供" in pack.inputs[0].content["source_limitations"][0]
+    assert pack.inputs[0].content["generation_constraints"] == {
+        "expected_chapters": 12
+    }
+    assert "topic" not in pack.inputs[0].content
     assert pack.total_chars <= 8_000
 
 
@@ -148,6 +156,7 @@ def test_writer_pack_uses_current_brief_and_previous_summary_not_full_context():
         reference(records["batch_plan"]),
         lesson_index=1,
         previous_lesson_ref=reference(records["lesson"]),
+        min_effective_chars=12_000,
     )
 
     assert [item.kind for item in pack.inputs] == [
@@ -161,6 +170,10 @@ def test_writer_pack_uses_current_brief_and_previous_summary_not_full_context():
     assert "下一章解释条件分支" in serialized
     assert "这是一段候选正文" not in serialized
     assert "private_notes" not in serialized
+    assert pack.inputs[0].content == {
+        "generation_constraints": {"min_effective_chars": 12_000}
+    }
+    assert "token_limit" not in serialized
     assert pack.total_chars <= 12_000
 
 

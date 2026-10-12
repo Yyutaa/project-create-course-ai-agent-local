@@ -61,19 +61,30 @@ class ContextPackBuilder:
             })],
         )
 
-    def for_blueprint(self, run_id: str, mission_ref: ArtifactRef) -> ContextPack:
+    def for_blueprint(
+        self,
+        run_id: str,
+        mission_ref: ArtifactRef,
+        *,
+        expected_chapters: int | None = None,
+    ) -> ContextPack:
         mission = self._load(run_id, mission_ref)
+        content = {
+            "mission": mission.content,
+            "source_summaries": [],
+            "source_limitations": ["当前 Run 未提供已批准来源摘要"],
+        }
+        if expected_chapters is not None:
+            content["generation_constraints"] = {
+                "expected_chapters": expected_chapters
+            }
         return self._pack(
             "blueprint",
             [
                 AgentInput(
                     kind="mission",
                     reference=mission_ref,
-                    content={
-                        "mission": mission.content,
-                        "source_summaries": [],
-                        "source_limitations": ["当前 Run 未提供已批准来源摘要"],
-                    },
+                    content=content,
                 )
             ],
         )
@@ -87,6 +98,7 @@ class ContextPackBuilder:
         *,
         lesson_index: int,
         previous_lesson_ref: ArtifactRef | None = None,
+        min_effective_chars: int | None = None,
     ) -> ContextPack:
         self._load(run_id, mission_ref)
         blueprint = self._load(run_id, blueprint_ref)
@@ -116,6 +128,7 @@ class ContextPackBuilder:
             brief,
             previous_summary,
             ledger,
+            min_effective_chars,
         )
         truncated = False
         for field, empty in (
@@ -136,6 +149,7 @@ class ContextPackBuilder:
                         brief,
                         previous_summary,
                         ledger,
+                        min_effective_chars,
                     )
         return self._pack("writer", inputs, truncated=truncated)
 
@@ -195,9 +209,19 @@ class ContextPackBuilder:
         brief: dict,
         previous_summary: str,
         ledger: list[dict],
+        min_effective_chars: int | None,
     ) -> list[AgentInput]:
+        mission_content = {}
+        if min_effective_chars is not None:
+            mission_content["generation_constraints"] = {
+                "min_effective_chars": min_effective_chars
+            }
         return [
-            AgentInput(kind="mission", reference=mission_ref, content={}),
+            AgentInput(
+                kind="mission",
+                reference=mission_ref,
+                content=mission_content,
+            ),
             AgentInput(
                 kind="blueprint",
                 reference=blueprint_ref,

@@ -54,11 +54,13 @@ class MultiLessonProvider(FakeProvider):
         self.fail_writer_call = fail_writer_call
         self.manual_review = manual_review
         self.malformed_writer_call = malformed_writer_call
+        self.blueprint_requests = []
         self.writer_requests = []
         self.reviewer_requests = []
 
     def invoke(self, request):
         if request.role == "blueprint":
+            self.blueprint_requests.append(request)
             return AgentResponse(
                 role="blueprint",
                 payload={
@@ -226,6 +228,12 @@ def test_two_batches_update_ledger_and_pass_previous_summary(tmp_path):
     assert len(run.batch_plan.batches) == 2
     assert len(run.batch_plan.continuity_ledger) == 4
     assert len(provider.writer_requests) == 4
+    blueprint_input = provider.blueprint_requests[0].inputs[0].content
+    assert blueprint_input["generation_constraints"] == {"expected_chapters": 12}
+    assert "topic" not in blueprint_input
+    assert provider.writer_requests[0].inputs[0].content == {
+        "generation_constraints": {"min_effective_chars": 12_000}
+    }
     second_batch_first = provider.writer_requests[3]
     assert (
         second_batch_first.inputs[2].content["previous_lesson_summary"]
