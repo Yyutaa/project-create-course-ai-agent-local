@@ -156,7 +156,7 @@ def test_blueprint_chapter_count_outlier_waits_before_batch_plan(tmp_path):
     run = runner.get(created.id)
     assert run.status == "waiting_for_human"
     assert run.stages[3].status == "waiting_for_human"
-    assert run.stages[3].failure_reason == "章节数偏离预期，需要人工确认"
+    assert run.stages[3].failure_reason == "blueprint_chapter_deviation"
     assert run.batch_plan is None
     assert provider.writer_requests == []
     with store.connect() as connection:

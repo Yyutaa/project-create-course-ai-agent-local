@@ -12,7 +12,7 @@ STAGES = (
     "quality",
     "release",
 )
-BLUEPRINT_CHAPTER_DEVIATION_REASON = "章节数偏离预期，需要人工确认"
+BLUEPRINT_CHAPTER_DEVIATION_REASON = "blueprint_chapter_deviation"
 StageName = Literal[
     "intake", "mission", "blueprint", "batch_plan", "generation", "quality", "release"
 ]

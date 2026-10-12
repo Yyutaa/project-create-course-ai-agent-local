@@ -36,10 +36,17 @@ def start(client, key="start-1", course=None, *, process=True, legacy=True):
     )
     if response.status_code == 202 and legacy:
         runner = app.dependency_overrides[get_runner]()
+        run = runner.get(response.json()["id"])
+        run.constraints_version = 0
         with runner.store.connect() as connection:
             connection.execute(
-                "UPDATE runs SET mission_review_required=0 WHERE id=?",
+                "UPDATE runs SET mission_review_required=0, constraints_version=0 "
+                "WHERE id=?",
                 (response.json()["id"],),
+            )
+            connection.execute(
+                "UPDATE snapshots SET projection_json=? WHERE run_id=?",
+                (run.model_dump_json(), run.id),
             )
     if process and response.status_code == 202:
         runner = app.dependency_overrides[get_runner]()
@@ -143,6 +150,59 @@ def test_run_responses_hide_intake_raw_fields(client):
     assert "PRIVATE_TOPIC_731" not in created.text
     assert "PRIVATE_TOPIC_731" not in client.get(f"/api/v0/runs/{run_id}").text
     assert "PRIVATE_TOPIC_731" not in client.get(f"/api/v0/runs/{run_id}/snapshot").text
+
+
+def test_create_response_preserves_constraints_but_hides_intake(client):
+    payload = {
+        **COURSE,
+        "topic": "PRIVATE_TOPIC_731",
+        "expected_chapters": 8,
+        "min_effective_chars": 9000,
+        "token_limit": 12345,
+    }
+    response = start(client, course=payload, process=False, legacy=False)
+
+    assert response.status_code == 202
+    assert "PRIVATE_TOPIC_731" not in response.text
+    assert response.json()["course_input"] == {
+        "topic": "已隐藏",
+        "audience": "已隐藏",
+        "goal": "已隐藏",
+        "language": "zh",
+        "expected_chapters": 8,
+        "min_effective_chars": 9000,
+        "token_limit": 12345,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("expected_chapters", 0), ("min_effective_chars", 0), ("token_limit", 0)],
+)
+def test_invalid_constraint_response_omits_raw_input(client, field, value):
+    response = start(
+        client,
+        course={**COURSE, field: value},
+        process=False,
+        legacy=False,
+    )
+
+    assert response.status_code == 422
+    assert '"input"' not in response.text
+
+
+def test_public_run_exposes_only_stable_constraint_stop_reason(client):
+    response = start(client, process=False, legacy=False)
+    run_id = response.json()["id"]
+    facts = app.dependency_overrides[get_runner]().store
+    run = facts.get_run(run_id)
+    run.status = "stopped"
+    run.stages[2].status = "stopped"
+    run.stages[2].failure_reason = "token_limit_reached"
+    facts.record(run, "budget.token_exhausted", "blueprint")
+
+    public = client.get(f"/api/v0/runs/{run_id}")
+    assert public.json()["stages"][2]["failure_reason"] == "token_limit_reached"
 
 
 def test_api_control_posts_only_accept_and_read_model_is_read_only(client):

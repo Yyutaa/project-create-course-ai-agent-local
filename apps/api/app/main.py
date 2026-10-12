@@ -27,8 +27,8 @@ LOCAL_HOSTS = {"localhost:5176", "127.0.0.1:5176", "localhost:8002", "127.0.0.1:
 
 
 @app.exception_handler(RequestValidationError)
-async def redact_config_validation(request: Request, error: RequestValidationError):
-    if request.url.path == "/api/v0/llm-config":
+async def redact_v0_validation(request: Request, error: RequestValidationError):
+    if request.url.path.startswith("/api/v0/"):
         details = [
             {"loc": item["loc"], "msg": item["msg"], "type": item["type"]}
             for item in error.errors()

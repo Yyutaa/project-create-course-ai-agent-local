@@ -1,7 +1,7 @@
 """Delivery evidence is linked by Run ID without copying private content."""
 
 from app.v0.execution import ExecutionStore
-from app.v0.schemas import CourseInput, GraphState
+from app.v0.schemas import ArtifactRef, CourseInput, GraphState
 from app.v0.storage import FactStore
 import pytest
 
@@ -390,3 +390,72 @@ def test_execution_read_model_hides_historical_wait_reason(tmp_path):
     waiting.stages[1].failure_reason = "api_key=TOPSECRET_731"
     facts.record(waiting, "stage.waiting", "mission")
     assert "TOPSECRET_731" not in ExecutionStore(facts.path).read_model(run.id).model_dump_json()
+
+
+def test_constraint_evidence_indexes_events_without_copying_course_content(tmp_path):
+    from app.v0.delivery import DeliveryStore, safe_rule_id
+    from app.v0.provider import FakeProvider
+    from app.v0.worker import Worker
+
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        CourseInput(
+            topic="PRIVATE_TOPIC_731",
+            audience="初学者",
+            goal="解释变量",
+            language="zh",
+            expected_chapters=1,
+            min_effective_chars=12_000,
+        ),
+        "constraint-evidence",
+        enqueue_start=True,
+    )
+    with facts.connect() as connection:
+        connection.execute(
+            "UPDATE runs SET mission_review_required=0 WHERE id=?", (run.id,)
+        )
+    Worker(facts.path, provider=FakeProvider()).run_once()
+    current = facts.get_run(run.id)
+    blueprint = next(item for item in current.artifacts if item.kind == "blueprint")
+    blueprint_ref = ArtifactRef(
+        run_id=run.id,
+        artifact_id=blueprint.artifact_id,
+        version=blueprint.version,
+        kind="blueprint",
+        content_hash=blueprint.content_hash,
+    )
+    facts.record(
+        current,
+        "blueprint.chapter_deviation_accepted",
+        "batch_plan",
+        accepted_ref=blueprint_ref,
+    )
+    current = facts.get_run(run.id)
+    current.status = "stopped"
+    current.stages[5].status = "stopped"
+    current.stages[5].failure_reason = "token_limit_reached"
+    facts.record(current, "budget.token_exhausted", "quality")
+
+    evidence = DeliveryStore(facts.path).read(run.id)
+    kinds = {item.kind for item in evidence.constraint_events}
+    assert kinds == {
+        "blueprint.chapter_count_observed",
+        "blueprint.chapter_deviation_accepted",
+        "budget.token_exhausted",
+    }
+    accepted = next(
+        item
+        for item in evidence.constraint_events
+        if item.kind == "blueprint.chapter_deviation_accepted"
+    )
+    assert accepted.artifact_id == blueprint.artifact_id
+    assert accepted.artifact_version == blueprint.version
+    assert any(
+        item.rule_id == safe_rule_id("lesson.effective_chars.minimum")
+        for item in evidence.findings
+    )
+    serialized = evidence.model_dump_json()
+    assert "PRIVATE_TOPIC_731" not in serialized
+    assert "候选正文" not in serialized
+    assert "prompt" not in serialized.lower()

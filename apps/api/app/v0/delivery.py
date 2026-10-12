@@ -75,6 +75,14 @@ class TraceDecision(BaseModel):
     action: str | None
 
 
+class TraceConstraintEvent(BaseModel):
+    event_id: int
+    kind: str
+    status: str | None
+    artifact_id: str | None
+    artifact_version: int | None
+
+
 class PathEvidence(BaseModel):
     scenario: str
     status: str
@@ -91,6 +99,7 @@ class DeliveryEvidence(BaseModel):
     findings: list[TraceFinding]
     verifications: list[TraceVerification]
     decisions: list[TraceDecision]
+    constraint_events: list[TraceConstraintEvent]
     paths: list[PathEvidence]
     integrity_issues: list[str]
 
@@ -136,6 +145,14 @@ class DeliveryStore:
             budget_events = connection.execute(
                 "SELECT id FROM events WHERE run_id=? AND "
                 "type IN ('budget.exhausted','budget.repair_exhausted')",
+                (trace_id,),
+            ).fetchall()
+            constraint_events = connection.execute(
+                "SELECT id, type, status, artifact_id, artifact_version FROM events "
+                "WHERE run_id=? AND type IN ("
+                "'blueprint.chapter_count_observed',"
+                "'blueprint.chapter_deviation_accepted',"
+                "'budget.token_exhausted') ORDER BY id",
                 (trace_id,),
             ).fetchall()
         findings: dict[str, TraceFinding] = {}
@@ -233,6 +250,13 @@ class DeliveryStore:
             decisions=[TraceDecision(
                 event_id=row["id"], kind=row["type"], action=row["action"],
             ) for row in decisions],
+            constraint_events=[TraceConstraintEvent(
+                event_id=row["id"],
+                kind=row["type"],
+                status=row["status"],
+                artifact_id=row["artifact_id"],
+                artifact_version=row["artifact_version"],
+            ) for row in constraint_events],
             paths=[
                 PathEvidence(
                     scenario="normal",
