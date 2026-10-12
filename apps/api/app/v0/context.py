@@ -36,15 +36,27 @@ class ContextPackBuilder:
     def __init__(self, loader: Callable[[str, int], ArtifactRecord]):
         self.loader = loader
 
-    def for_mission(self, course_input: CourseInput) -> ContextPack:
+    def for_mission(
+        self,
+        course_input: CourseInput,
+        *,
+        include_generation_constraints: bool = True,
+    ) -> ContextPack:
         return self._pack(
             "mission",
-            [AgentInput(kind="intake", content=course_input.model_dump())],
+            [AgentInput(
+                kind="intake",
+                content=self._mission_input(
+                    course_input, include_generation_constraints
+                ),
+            )],
         )
 
     def for_mission_revision(
         self, run_id: str, course_input: CourseInput,
         prior_ref: ArtifactRef, feedback: str,
+        *,
+        include_generation_constraints: bool = True,
     ) -> ContextPack:
         prior = self._load(run_id, prior_ref)
         if prior_ref.kind != "mission":
@@ -52,7 +64,9 @@ class ContextPackBuilder:
         return self._pack(
             "mission",
             [AgentInput(kind="intake", content={
-                **course_input.model_dump(),
+                **self._mission_input(
+                    course_input, include_generation_constraints
+                ),
                 "revision_request": {
                     "feedback": feedback,
                     "prior_ref": prior_ref.model_dump(),
@@ -60,6 +74,15 @@ class ContextPackBuilder:
                 },
             })],
         )
+
+    @staticmethod
+    def _mission_input(
+        course_input: CourseInput, include_generation_constraints: bool
+    ) -> dict:
+        exclude = set() if include_generation_constraints else {
+            "expected_chapters", "min_effective_chars", "token_limit",
+        }
+        return course_input.model_dump(exclude=exclude)
 
     def for_blueprint(
         self,

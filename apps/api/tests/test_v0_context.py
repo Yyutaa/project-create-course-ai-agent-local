@@ -126,6 +126,52 @@ def test_mission_pack_contains_only_intake():
     assert pack.total_chars <= 4_000
 
 
+def test_legacy_mission_pack_omits_generation_constraint_defaults():
+    builder, _ = fixture_builder()
+    course_input = CourseInput(
+        topic="Python",
+        audience="初学者",
+        goal="完成练习",
+        language="zh",
+    )
+
+    pack = builder.for_mission(
+        course_input,
+        include_generation_constraints=False,
+    )
+
+    assert pack.inputs[0].content == {
+        "topic": "Python",
+        "audience": "初学者",
+        "goal": "完成练习",
+        "language": "zh",
+    }
+
+
+def test_legacy_mission_revision_omits_generation_constraint_defaults():
+    builder, records = fixture_builder()
+    course_input = CourseInput(
+        topic="Python",
+        audience="初学者",
+        goal="完成练习",
+        language="zh",
+    )
+
+    pack = builder.for_mission_revision(
+        "run-1",
+        course_input,
+        reference(records["mission"]),
+        "缩小范围",
+        include_generation_constraints=False,
+    )
+
+    content = pack.inputs[0].content
+    assert "expected_chapters" not in content
+    assert "min_effective_chars" not in content
+    assert "token_limit" not in content
+    assert content["revision_request"]["feedback"] == "缩小范围"
+
+
 def test_blueprint_pack_contains_mission_and_explicit_empty_source_summary():
     builder, records = fixture_builder()
 

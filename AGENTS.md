@@ -115,7 +115,7 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 - Mission、Blueprint、Lesson、Review 模型输出禁止额外字段。解析失败必须以角色、字段
   路径和错误类型写入当前阶段失败原因，但不得回显密钥、完整 Prompt 或原始敏感输出。
 - Artifact 的生产角色和来源引用属于事实，Snapshot 仍只是可重建读取投影。
-  当前 schema 版本以“本地 DeepSeek 配置存储”节为准。
+  当前 schema 版本以“课程生成约束”节为准。
 
 ## LangGraph 控制流契约
 

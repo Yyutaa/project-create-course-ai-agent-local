@@ -274,11 +274,18 @@ class WorkflowNodes:
             }
         if review and review["action"] == "revise" and prior_ref:
             pack = self.context.for_mission_revision(
-                state.run_id, run.course_input, prior_ref, review["feedback"]
+                state.run_id,
+                run.course_input,
+                prior_ref,
+                review["feedback"],
+                include_generation_constraints=run.constraints_version == 1,
             )
             sources = [prior_ref]
         else:
-            pack = self.context.for_mission(run.course_input)
+            pack = self.context.for_mission(
+                run.course_input,
+                include_generation_constraints=run.constraints_version == 1,
+            )
             sources = []
         result = self.runner.executor.invoke("mission", state.run_id, inputs=pack.inputs)
         self.runner._write_role_success(
@@ -554,8 +561,15 @@ class WorkflowNodes:
         report = self._evaluate(state, lesson_ref)
         summary = self._quality_summary(run.quality, report)
         if any(item.status != "pass" for item in report.results):
-            finding = report.findings[0] if report.findings else None
-            if finding and finding.rule_id == "lesson.effective_chars.minimum":
+            character_finding = next(
+                (
+                    item
+                    for item in report.findings
+                    if item.rule_id == "lesson.effective_chars.minimum"
+                ),
+                None,
+            )
+            if character_finding is not None:
                 self.runner._mark_waiting(
                     state.run_id,
                     index,
@@ -565,6 +579,7 @@ class WorkflowNodes:
                     quality_sources,
                 )
                 return {"current_node": "quality", "last_outcome": "waiting_for_human"}
+            finding = report.findings[0] if report.findings else None
             if finding is None or finding.category == "fact":
                 self.runner._mark_waiting(
                     state.run_id,

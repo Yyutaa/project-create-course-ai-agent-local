@@ -23,7 +23,21 @@ GATE_ORDER = ("deterministic", "rubric", "humanizer")
 
 def effective_character_count(markdown: str) -> int:
     """Count visible lesson characters while preserving fenced code content."""
-    text = re.sub(r"(?m)^[ \t]*(?:```|~~~).*$", "", markdown)
+    prose_lines = []
+    code_chars = 0
+    fence_marker = None
+    for line in markdown.splitlines():
+        marker = re.match(r"^[ \t]*(`{3,}|~{3,})", line)
+        if marker and (
+            fence_marker is None or marker.group(1)[0] == fence_marker
+        ):
+            fence_marker = None if fence_marker else marker.group(1)[0]
+            continue
+        if fence_marker:
+            code_chars += len(re.sub(r"\s+", "", line))
+        else:
+            prose_lines.append(line)
+    text = "\n".join(prose_lines)
     text = re.sub(r"<[^>]*>", "", text)
     text = re.sub(r"!?\[([^]]*)\]\([^)]*\)", r"\1", text)
     text = re.sub(
@@ -32,7 +46,7 @@ def effective_character_count(markdown: str) -> int:
         text,
     )
     text = re.sub(r"[*_~`]", "", text)
-    return len(re.sub(r"\s+", "", text))
+    return code_chars + len(re.sub(r"\s+", "", text))
 
 
 @dataclass(frozen=True)

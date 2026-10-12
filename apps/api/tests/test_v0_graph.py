@@ -64,10 +64,13 @@ class MultiLessonProvider(FakeProvider):
         self.manual_review = manual_review
         self.malformed_writer_call = malformed_writer_call
         self.blueprint_requests = []
+        self.mission_requests = []
         self.writer_requests = []
         self.reviewer_requests = []
 
     def invoke(self, request):
+        if request.role == "mission":
+            self.mission_requests.append(request)
         if request.role == "blueprint":
             self.blueprint_requests.append(request)
             return AgentResponse(
@@ -113,6 +116,19 @@ class MultiLessonProvider(FakeProvider):
                 ).model_dump(),
             )
         return super().invoke(request)
+
+
+def test_legacy_run_mission_omits_generation_constraint_defaults(tmp_path):
+    provider = MultiLessonProvider(lesson_count=1)
+    runner = V0Runner(provider, store=FactStore(tmp_path / "facts.sqlite3"))
+    run = runner.create(COURSE, request_key="legacy-mission-context")
+
+    execute_legacy(runner, run.id)
+
+    content = provider.mission_requests[0].inputs[0].content
+    assert "expected_chapters" not in content
+    assert "min_effective_chars" not in content
+    assert "token_limit" not in content
 
 
 @pytest.mark.parametrize("lesson_count", [11, 13])
@@ -173,7 +189,7 @@ def test_blueprint_chapter_count_outlier_waits_before_batch_plan(tmp_path):
 
 
 def test_short_lesson_waits_for_human_without_auto_repair(tmp_path):
-    provider = MultiLessonProvider(lesson_count=1)
+    provider = MultiLessonProvider(lesson_count=1, malformed_writer_call=1)
     store = FactStore(tmp_path / "facts.sqlite3")
     runner = V0Runner(provider, store=store)
     created = runner.create(

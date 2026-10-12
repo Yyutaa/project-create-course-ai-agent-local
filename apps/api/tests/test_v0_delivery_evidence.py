@@ -213,18 +213,19 @@ def test_budget_summary_reports_known_and_unknown_token_usage(tmp_path):
     with facts.connect() as connection:
         connection.executemany(
             "INSERT INTO provider_calls(id,run_id,role,status,input_tokens,"
-            "output_tokens,started_at) VALUES (?,?,?,'SUCCEEDED',?,?,'now')",
+            "output_tokens,started_at) VALUES (?,?,?,?,?,?,'now')",
             [
-                ("call-1", run.id, "mission", 100, 20),
-                ("call-2", run.id, "writer", None, None),
-                ("call-3", run.id, "reviewer", 50, 10),
+                ("call-1", run.id, "mission", "SUCCEEDED", 100, 20),
+                ("call-2", run.id, "writer", "SUCCEEDED", None, None),
+                ("call-3", run.id, "reviewer", "SUCCEEDED", 50, 10),
+                ("call-4", run.id, "repair", "RESERVED", None, None),
             ],
         )
 
     summary = BudgetStore(facts.path).summary(run.id)
     assert summary.tokens_used == 180
     assert summary.token_limit == 180
-    assert summary.token_usage_unknown == 1
+    assert summary.token_usage_unknown == 2
     assert summary.token_exhausted is True
 
 
@@ -407,6 +408,7 @@ def test_constraint_evidence_indexes_events_without_copying_course_content(tmp_p
             language="zh",
             expected_chapters=1,
             min_effective_chars=12_000,
+            token_limit=100_000,
         ),
         "constraint-evidence",
         enqueue_start=True,
@@ -432,6 +434,12 @@ def test_constraint_evidence_indexes_events_without_copying_course_content(tmp_p
         accepted_ref=blueprint_ref,
     )
     current = facts.get_run(run.id)
+    with facts.connect() as connection:
+        connection.execute(
+            "INSERT INTO provider_calls(id,run_id,role,status,input_tokens,"
+            "output_tokens,started_at) VALUES (?,?,?,'SUCCEEDED',300,100,'now')",
+            ("constraint-token-count", run.id, "reviewer"),
+        )
     current.status = "stopped"
     current.stages[5].status = "stopped"
     current.stages[5].failure_reason = "token_limit_reached"
@@ -451,10 +459,26 @@ def test_constraint_evidence_indexes_events_without_copying_course_content(tmp_p
     )
     assert accepted.artifact_id == blueprint.artifact_id
     assert accepted.artifact_version == blueprint.version
-    assert any(
-        item.rule_id == safe_rule_id("lesson.effective_chars.minimum")
-        for item in evidence.findings
+    observed = next(
+        item
+        for item in evidence.constraint_events
+        if item.kind == "blueprint.chapter_count_observed"
     )
+    assert (observed.expected_value, observed.actual_value) == (1, 1)
+    token_stop = next(
+        item
+        for item in evidence.constraint_events
+        if item.kind == "budget.token_exhausted"
+    )
+    assert token_stop.expected_value == 100_000
+    assert token_stop.actual_value == 400
+    character_finding = next(
+        item
+        for item in evidence.findings
+        if item.rule_id == safe_rule_id("lesson.effective_chars.minimum")
+    )
+    assert character_finding.expected_value == 12_000
+    assert 0 < character_finding.actual_value < 12_000
     serialized = evidence.model_dump_json()
     assert "PRIVATE_TOPIC_731" not in serialized
     assert "候选正文" not in serialized

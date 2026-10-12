@@ -115,6 +115,12 @@ def test_effective_count_strips_markup_and_whitespace_but_keeps_code():
     assert effective_character_count(markdown) == len("标题正文列表与链接print(1)")
 
 
+def test_effective_count_keeps_markdown_and_html_symbols_inside_fenced_code():
+    markdown = "# 标题\n\n```py\na*b <T> `x` _value_\n```"
+
+    assert effective_character_count(markdown) == len("标题a*b<T>`x`_value_")
+
+
 def test_effective_character_minimum_creates_blocking_finding():
     report = check_markdown(
         "# 标题\n\n正文",

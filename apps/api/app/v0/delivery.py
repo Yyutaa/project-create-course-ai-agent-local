@@ -6,6 +6,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from app.v0.quality_loop import effective_character_count
 from app.v0.storage import FactStore
 
 
@@ -57,6 +58,8 @@ class TraceFinding(BaseModel):
     lesson_id: str
     line_start: int
     excerpt_hash: str
+    expected_value: int | None = None
+    actual_value: int | None = None
 
 
 class TraceVerification(BaseModel):
@@ -81,6 +84,8 @@ class TraceConstraintEvent(BaseModel):
     status: str | None
     artifact_id: str | None
     artifact_version: int | None
+    expected_value: int | None = None
+    actual_value: int | None = None
 
 
 class PathEvidence(BaseModel):
@@ -112,7 +117,10 @@ class DeliveryStore:
     def read(self, trace_id: str) -> DeliveryEvidence:
         with self.facts.connect() as connection:
             run = connection.execute(
-                "SELECT status FROM runs WHERE id=?", (trace_id,)
+                "SELECT runs.status, intakes.expected_chapters, "
+                "intakes.min_effective_chars, intakes.token_limit FROM runs "
+                "JOIN intakes ON intakes.run_id=runs.id WHERE runs.id=?",
+                (trace_id,),
             ).fetchone()
             if run is None:
                 raise KeyError(trace_id)
@@ -157,12 +165,22 @@ class DeliveryStore:
             ).fetchall()
         findings: dict[str, TraceFinding] = {}
         verifications: list[TraceVerification] = []
+        artifact_contents = {
+            (row["artifact_id"], row["version"]): json.loads(row["content_json"])
+            for row in artifacts
+        }
         quality_artifacts = [row for row in artifacts if row["kind"] == "quality"]
         for artifact in quality_artifacts[-1:]:
             content = json.loads(artifact["content_json"])
             for finding in content.get("evidence_findings", []):
                 ref = finding["artifact_ref"]
                 location = finding["location"]
+                expected_value = None
+                actual_value = None
+                if finding["rule_id"] == "lesson.effective_chars.minimum":
+                    lesson = artifact_contents[(ref["artifact_id"], ref["version"])]
+                    expected_value = run["min_effective_chars"]
+                    actual_value = effective_character_count(lesson["markdown"])
                 findings[finding["finding_id"]] = TraceFinding(
                     id=finding["finding_id"], gate=finding["gate"],
                     rule_id=safe_rule_id(finding["rule_id"]),
@@ -170,6 +188,8 @@ class DeliveryStore:
                     artifact_version=ref["version"], lesson_id=location["lesson_id"],
                     line_start=location["line_start"],
                     excerpt_hash=location["excerpt_hash"],
+                    expected_value=expected_value,
+                    actual_value=actual_value,
                 )
             links = content.get("verification_links", [])
             for index, result in enumerate(content.get("verification_results", [])):
@@ -237,6 +257,33 @@ class DeliveryStore:
             if epochs and row["lease_epoch"] not in epochs:
                 recovery_ids.append(row["id"])
             epochs.add(row["lease_epoch"])
+        tokens_used = sum(
+            (row["input_tokens"] or 0) + (row["output_tokens"] or 0)
+            for row in provider_calls
+            if row["status"] != "RESERVED"
+        )
+        constraint_trace = []
+        for row in constraint_events:
+            expected_value = None
+            actual_value = None
+            if row["type"].startswith("blueprint.chapter_"):
+                expected_value = run["expected_chapters"]
+                blueprint = artifact_contents.get(
+                    (row["artifact_id"], row["artifact_version"])
+                )
+                actual_value = len(blueprint["lessons"]) if blueprint else None
+            elif row["type"] == "budget.token_exhausted":
+                expected_value = run["token_limit"]
+                actual_value = tokens_used
+            constraint_trace.append(TraceConstraintEvent(
+                event_id=row["id"],
+                kind=row["type"],
+                status=row["status"],
+                artifact_id=row["artifact_id"],
+                artifact_version=row["artifact_version"],
+                expected_value=expected_value,
+                actual_value=actual_value,
+            ))
         return DeliveryEvidence(
             trace_id=trace_id, run_status=run["status"],
             commands=[TraceCommand(**dict(row)) for row in commands],
@@ -250,13 +297,7 @@ class DeliveryStore:
             decisions=[TraceDecision(
                 event_id=row["id"], kind=row["type"], action=row["action"],
             ) for row in decisions],
-            constraint_events=[TraceConstraintEvent(
-                event_id=row["id"],
-                kind=row["type"],
-                status=row["status"],
-                artifact_id=row["artifact_id"],
-                artifact_version=row["artifact_version"],
-            ) for row in constraint_events],
+            constraint_events=constraint_trace,
             paths=[
                 PathEvidence(
                     scenario="normal",

@@ -193,8 +193,8 @@ class BudgetStore:
         usage = connection.execute(
             "SELECT COALESCE(SUM(CASE WHEN status!='RESERVED' THEN "
             "COALESCE(input_tokens,0)+COALESCE(output_tokens,0) ELSE 0 END),0), "
-            "COALESCE(SUM(CASE WHEN status!='RESERVED' AND "
-            "(input_tokens IS NULL OR output_tokens IS NULL) THEN 1 ELSE 0 END),0) "
+            "COALESCE(SUM(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL "
+            "THEN 1 ELSE 0 END),0) "
             "FROM provider_calls WHERE run_id=?",
             (run_id,),
         ).fetchone()

@@ -232,12 +232,17 @@ export type DeliveryEvidence = {
   nodes: { id: string; command_id: string | null; node: string; attempt: number; lease_epoch: number; status: string }[];
   artifacts: { id: string; version: number; kind: string; content_hash: string }[];
   provider_calls: { id: string; command_id: string | null; node_execution_id: string | null; role: string; status: string; duration_ms: number | null; input_tokens: number | null; output_tokens: number | null }[];
-  findings: { id: string; gate: string; rule_id: string; artifact_id: string; artifact_version: number }[];
+  findings: {
+    id: string; gate: string; rule_id: string;
+    artifact_id: string; artifact_version: number;
+    expected_value: number | null; actual_value: number | null;
+  }[];
   verifications: { id: string; gate: string; status: string; candidate_id: string; candidate_version: number; finding_id: string | null }[];
   decisions: { event_id: number; kind: string; action: string | null }[];
   constraint_events: {
     event_id: number; kind: string; status: string | null;
     artifact_id: string | null; artifact_version: number | null;
+    expected_value: number | null; actual_value: number | null;
   }[];
   paths: { scenario: "normal" | "recovery" | "human"; status: "observed" | "not_observed"; evidence_ids: string[] }[];
   integrity_issues: string[];
