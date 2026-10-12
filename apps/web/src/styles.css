@@ -233,6 +233,58 @@ p {
   min-height: 88px;
 }
 
+.generation-constraints {
+  margin: 24px 0;
+  padding: 20px;
+  border: 1px solid #c8d1c9;
+  border-radius: 6px;
+}
+
+.generation-constraints legend {
+  padding: 0 8px;
+  font-weight: 700;
+}
+
+.generation-constraints small {
+  color: #68726b;
+  font-weight: 400;
+}
+
+.constraint-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+}
+
+.token-choice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.token-choice > span {
+  width: 100%;
+  font-weight: 600;
+}
+
+.token-choice label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-weight: 400;
+}
+
+.token-choice input {
+  width: auto;
+}
+
+.constraint-summary {
+  color: #526057;
+  line-height: 1.7;
+}
+
 button {
   padding: 10px 18px;
   border: 0;

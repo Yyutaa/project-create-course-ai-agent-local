@@ -7,11 +7,14 @@ import { clearPendingKey, pendingKey } from "./idempotency";
 import {
   artifactHandoffLabel,
   batchProgressLabel,
+  budgetTokenLabel,
+  canResumeRun,
   canStartRun,
   canDecideRelease,
   canReviewMission,
   courseProgressLabel,
   continuityLedgerLabels,
+  generationConstraintLabels,
   pollInterval,
   qualityGateLabels,
   reviewFindingLabel,
@@ -206,7 +209,11 @@ function CourseWorkflowPage({ runId }: { runId?: string }) {
     audience: "",
     goal: "",
     language: "zh",
+    expected_chapters: 12,
+    min_effective_chars: 12000,
+    token_limit: null,
   });
+  const [tokenLimitDraft, setTokenLimitDraft] = useState(100000);
   const [reason, setReason] = useState("");
   const [revisionText, setRevisionText] = useState("");
   const [missionFeedback, setMissionFeedback] = useState("");
@@ -336,6 +343,15 @@ function CourseWorkflowPage({ runId }: { runId?: string }) {
   });
   const busy = startMutation.isPending || releaseMutation.isPending || controlMutation.isPending || budgetMutation.isPending || missionReviewMutation.isPending;
   const error = startMutation.error || releaseMutation.error || controlMutation.error || budgetMutation.error || missionReviewMutation.error || runQuery.error || contentQuery.error || executionQuery.error || evidenceQuery.error;
+  const chapterDeviation = run?.stages.some(
+    (stage) => stage.failure_reason === "blueprint_chapter_deviation",
+  ) ?? false;
+  const tokenTerminated = run?.stages.some(
+    (stage) => stage.failure_reason === "token_limit_reached",
+  ) || executionQuery.data?.budget.token_exhausted;
+  const lengthFinding = run?.quality?.evidence_findings?.find(
+    (finding) => finding.rule_id === "lesson.effective_chars.minimum",
+  );
 
   function start(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -389,6 +405,43 @@ function CourseWorkflowPage({ runId }: { runId?: string }) {
           <label>学习目标
             <textarea required value={input.goal} onChange={(event) => setInput({ ...input, goal: event.target.value })} />
           </label>
+          <fieldset className="generation-constraints">
+            <legend>生成约束</legend>
+            <p>章节数用于规划；有效字符会去除 Markdown、HTML 和空白，代码内容仍计数。</p>
+            <div className="constraint-grid">
+              <label>期望章节数
+                <input type="number" required min={1} max={100}
+                  value={input.expected_chapters}
+                  onChange={(event) => setInput({
+                    ...input, expected_chapters: event.target.valueAsNumber,
+                  })} />
+                <small>允许 ±1 章偏差；超出后等待人工确认。</small>
+              </label>
+              <label>单章有效字符数下限
+                <input type="number" required min={1}
+                  value={input.min_effective_chars}
+                  onChange={(event) => setInput({
+                    ...input, min_effective_chars: event.target.valueAsNumber,
+                  })} />
+              </label>
+            </div>
+            <div className="token-choice">
+              <span>Token 阈值</span>
+              <label><input type="radio" name="token-limit" checked={input.token_limit === null}
+                onChange={() => setInput({ ...input, token_limit: null })} /> 不限制</label>
+              <label><input type="radio" name="token-limit" checked={input.token_limit !== null}
+                onChange={() => setInput({ ...input, token_limit: tokenLimitDraft })} /> 设置阈值</label>
+            </div>
+            {input.token_limit !== null && <label>Token 阈值
+              <input type="number" required min={1} value={tokenLimitDraft}
+                onChange={(event) => {
+                  const value = event.target.valueAsNumber;
+                  setTokenLimitDraft(value);
+                  setInput({ ...input, token_limit: value });
+                }} />
+              <small>达到阈值后允许当前节点提交，并在下一节点前终止。</small>
+            </label>}
+          </fieldset>
           <p>语言：中文</p>
           <button type="submit" disabled={busy || !canStartRun(configQuery.data)}>开始 Run</button>
         </form>
@@ -416,6 +469,11 @@ function CourseWorkflowPage({ runId }: { runId?: string }) {
             <p>Run ID：<code>{run.id}</code></p>
             <p>Course ID：<code>{run.course_id}</code>；事实修订：{run.revision}</p>
             <p>当前状态：{run.status}</p>
+            {run.constraints_version === 1 ? <ul className="constraint-summary">
+              {generationConstraintLabels(run.course_input).map((label) => (
+                <li key={label}>{label}</li>
+              ))}
+            </ul> : <p>历史 Run：未启用生成约束。</p>}
           </section>
           <section className="result-card" aria-label="执行工作台">
             <h2>执行工作台</h2>
@@ -431,20 +489,29 @@ function CourseWorkflowPage({ runId }: { runId?: string }) {
               质量返工：{executionQuery.data.budget.repair_used}/{executionQuery.data.budget.repair_limit}
               {executionQuery.data.budget.repair_exhausted ? "；已升级人工" : ""}
             </p>}
+            {executionQuery.data?.budget && <p role={executionQuery.data.budget.token_exhausted ? "alert" : undefined}>
+              {budgetTokenLabel(executionQuery.data.budget)}
+            </p>}
+            {lengthFinding && <p role="alert">
+              单章有效字符不足：{lengthFinding.evidence}；{lengthFinding.expected}
+            </p>}
+            {tokenTerminated && <p role="alert">Token 阈值已终止本次 Run，不能继续或修订。</p>}
             <ul>
               {(executionQuery.data?.commands ?? []).map((command) => (
                 <li key={command.id}>{command.kind} · {command.status}{command.error ? ` · ${command.error}` : ""}</li>
               ))}
             </ul>
             {run.status === "running" && <button disabled={busy} onClick={() => controlMutation.mutate("STOP")}>请求停止</button>}
-            {(run.status === "stopped" || (run.status === "waiting_for_human" && !canDecideRelease(run)
+            {canResumeRun(run, executionQuery.data) && (run.status === "stopped" || (run.status === "waiting_for_human" && !canDecideRelease(run)
               && executionQuery.data?.mission_review?.status !== "pending")) && executionQuery.data?.checkpoint && (
               <div>
                 <label>人工修订说明
                   <textarea value={revisionText} onChange={(event) => setRevisionText(event.target.value)} />
                 </label>
                 <button disabled={busy || !revisionText.trim()} onClick={() => controlMutation.mutate("REVISE")}>提交修订</button>
-                <button disabled={busy} onClick={() => controlMutation.mutate("RESUME")}>继续执行</button>
+                <button disabled={busy} onClick={() => controlMutation.mutate("RESUME")}>
+                  {chapterDeviation ? "接受偏差并继续" : "继续执行"}
+                </button>
               </div>
             )}
             {run.status === "waiting_for_human" && executionQuery.data?.budget.requires_human && executionQuery.data.checkpoint && (
@@ -526,7 +593,7 @@ function CourseWorkflowPage({ runId }: { runId?: string }) {
             </section>
           )}
           {run.status === "ready_for_release" && <p className="notice">人工已选择准备发布；V0 尚未发布任何文件。</p>}
-          {run.status === "stopped" && <p className="notice">人工已停止本次运行。</p>}
+          {run.status === "stopped" && !tokenTerminated && <p className="notice">人工已停止本次运行。</p>}
         </>
       )}
     </div>

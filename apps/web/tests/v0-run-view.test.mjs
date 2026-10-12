@@ -7,7 +7,10 @@ import {
   canStartRun,
   canDecideRelease,
   canReviewMission,
+  canResumeRun,
   continuityLedgerLabels,
+  budgetTokenLabel,
+  generationConstraintLabels,
   preferNewerRun,
   reviewFindingLabel,
   qualityGateLabels,
@@ -104,6 +107,67 @@ test("new Run stays gated until local config is ready", () => {
   assert.equal(canStartRun(undefined), false);
   assert.equal(canStartRun({ configured: false, error: "keyring_unavailable" }), false);
   assert.equal(canStartRun({ configured: true, error: null }), true);
+});
+
+test("generation constraints and token usage have stable readable labels", () => {
+  assert.deepEqual(generationConstraintLabels({
+    expected_chapters: 12,
+    min_effective_chars: 12000,
+    token_limit: null,
+  }), [
+    "期望章节：12（允许 ±1 章偏差）",
+    "单章下限：12,000 有效字符",
+    "Token 阈值：不限制",
+  ]);
+  assert.equal(budgetTokenLabel({
+    tokens_used: 180,
+    token_limit: 180,
+    token_usage_unknown: 1,
+    token_exhausted: true,
+  }), "Token：180/180；1 次用量未知；已达阈值");
+});
+
+test("chapter deviation can resume but token termination cannot", () => {
+  const waiting = {
+    status: "waiting_for_human",
+    stages: [{ failure_reason: "blueprint_chapter_deviation" }],
+  };
+  assert.equal(canResumeRun(waiting, { budget: { token_exhausted: false } }), true);
+  assert.equal(canResumeRun({
+    status: "stopped",
+    stages: [{ failure_reason: "token_limit_reached" }],
+  }, { budget: { token_exhausted: true } }), false);
+});
+
+test("new course payload includes explicit generation constraint defaults", async () => {
+  const originalFetch = globalThis.fetch;
+  let body;
+  globalThis.fetch = async (_path, init) => {
+    body = JSON.parse(init.body);
+    return new Response(JSON.stringify({ id: "run-1" }), { status: 202 });
+  };
+  try {
+    await api.startRun({
+      topic: "变量",
+      audience: "初学者",
+      goal: "学习变量",
+      language: "zh",
+      expected_chapters: 12,
+      min_effective_chars: 12000,
+      token_limit: null,
+    }, "start-constraints");
+    assert.deepEqual(body, {
+      topic: "变量",
+      audience: "初学者",
+      goal: "学习变量",
+      language: "zh",
+      expected_chapters: 12,
+      min_effective_chars: 12000,
+      token_limit: null,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 

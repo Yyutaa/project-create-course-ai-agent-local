@@ -1,4 +1,4 @@
-import type { ArtifactSummary, BatchPlan, CourseProgress, ExecutionReadModel, Finding, GateResult, LlmConfigStatus, ReviewFinding, V0Run } from "./api";
+import type { ArtifactSummary, BatchPlan, CourseInput, CourseProgress, ExecutionReadModel, Finding, GateResult, LlmConfigStatus, ReviewFinding, V0Run } from "./api";
 
 const STAGES = ["intake", "mission", "blueprint", "batch_plan", "generation", "quality", "release"];
 const STAGE_STATUS_LABELS = {
@@ -16,6 +16,41 @@ export function courseProgressLabel(course: Pick<CourseProgress, "current_stage"
 
 export function canStartRun(config?: Pick<LlmConfigStatus, "configured">): boolean {
   return config?.configured === true;
+}
+
+export function generationConstraintLabels(
+  input: Pick<CourseInput, "expected_chapters" | "min_effective_chars" | "token_limit">,
+): string[] {
+  return [
+    `期望章节：${input.expected_chapters.toLocaleString("en-US")}（允许 ±1 章偏差）`,
+    `单章下限：${input.min_effective_chars.toLocaleString("en-US")} 有效字符`,
+    `Token 阈值：${input.token_limit === null
+      ? "不限制" : input.token_limit.toLocaleString("en-US")}`,
+  ];
+}
+
+export function budgetTokenLabel(
+  budget: Pick<ExecutionReadModel["budget"],
+    "tokens_used" | "token_limit" | "token_usage_unknown" | "token_exhausted">,
+): string {
+  const used = budget.tokens_used.toLocaleString("en-US");
+  const limit = budget.token_limit === null
+    ? "；不限制" : `/${budget.token_limit.toLocaleString("en-US")}`;
+  const unknown = budget.token_usage_unknown > 0
+    ? `；${budget.token_usage_unknown} 次用量未知` : "";
+  return `Token：${used}${limit}${unknown}${budget.token_exhausted ? "；已达阈值" : ""}`;
+}
+
+export function canResumeRun(
+  run: Pick<V0Run, "status"> & {
+    stages: Pick<V0Run["stages"][number], "failure_reason">[];
+  },
+  execution?: { budget: Pick<ExecutionReadModel["budget"], "token_exhausted"> } | null,
+): boolean {
+  const resumable = run.status === "stopped" || run.status === "waiting_for_human";
+  const tokenStopped = execution?.budget.token_exhausted
+    || run.stages.some((stage) => stage.failure_reason === "token_limit_reached");
+  return resumable && !tokenStopped;
 }
 
 export function shouldPoll(status: V0Run["status"]): boolean {

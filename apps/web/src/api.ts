@@ -34,6 +34,9 @@ export type CourseInput = {
   audience: string;
   goal: string;
   language: "zh";
+  expected_chapters: number;
+  min_effective_chars: number;
+  token_limit: number | null;
 };
 
 export type StageRecord = {
@@ -47,6 +50,7 @@ export type StageRecord = {
 export type V0Run = {
   id: string;
   course_id: string | null;
+  constraints_version: number;
   revision: number;
   artifacts: ArtifactSummary[];
   course_input: CourseInput;
@@ -216,6 +220,8 @@ export type ExecutionReadModel = {
     used: number; limit: number; warning_at: number;
     warning: boolean; requires_human: boolean; unknown: number;
     repair_used: number; repair_limit: number; repair_exhausted: boolean;
+    tokens_used: number; token_limit: number | null;
+    token_usage_unknown: number; token_exhausted: boolean;
   };
 };
 
@@ -229,6 +235,10 @@ export type DeliveryEvidence = {
   findings: { id: string; gate: string; rule_id: string; artifact_id: string; artifact_version: number }[];
   verifications: { id: string; gate: string; status: string; candidate_id: string; candidate_version: number; finding_id: string | null }[];
   decisions: { event_id: number; kind: string; action: string | null }[];
+  constraint_events: {
+    event_id: number; kind: string; status: string | null;
+    artifact_id: string | null; artifact_version: number | null;
+  }[];
   paths: { scenario: "normal" | "recovery" | "human"; status: "observed" | "not_observed"; evidence_ids: string[] }[];
   integrity_issues: string[];
 };
