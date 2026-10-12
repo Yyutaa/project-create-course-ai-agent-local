@@ -105,8 +105,9 @@ Writer 的最小 Context Pack 增加当前 Run 的 `min_effective_chars`，使�
 ### 5.4 Quality
 
 deterministic quality gate 在现有 Markdown 结构检查中增加有效字符统计。统计器必须是纯函数，
-相同 Markdown 始终得到相同结果。低于下限时产生阻断型 `content_length` Finding，绑定精确
-Lesson ArtifactRef、实际值、下限和证据 hash。
+相同 Markdown 始终得到相同结果。低于下限时产生规则 ID 为
+`lesson.effective_chars.minimum` 的阻断型 `structure` Finding，绑定精确 Lesson ArtifactRef、
+实际值、下限和证据 hash。
 
 现有 Repair 只允许精确单行替换，无法安全承担整章扩写。字符不足因此不进入自动 Repair，
 而是以 `lesson_effective_chars_below_minimum` 停在 `quality=waiting_for_human`。

@@ -194,7 +194,8 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 - 一次 Run 的 `trace_id` 固定等于其 `run_id`。Command、NodeExecution、Artifact、
   Finding、Verification 和人工决定必须能沿 Run ID 与稳定对象 ID、精确 Artifact
   版本追溯；NodeExecution 记录所属 Command ID。证据索引是可重建的读取投影，
-  不复制正文，不取代 SQLite Artifact/Event 事实。现行 SQLite schema 版本为 4。
+  不复制正文，不取代 SQLite Artifact/Event 事实。交付证据能力引入时的 SQLite
+  schema 版本为 4；现行版本以后续约束为准。
 - Provider 调用先持久预留，按实际尝试计数；崩溃后结果未知仍占预算。每 Run 默认
   48 次预警、60 次硬上限；到线写 `budget.warning` / `budget.exhausted` Event，
   后者阻止下一次模型调用并使 Graph 等待人工。REVISE 仅在耗尽等待态、匹配最新
@@ -218,7 +219,8 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 
 ## Mission 人工确认门禁
 
-- 本功能上线后创建的 Run 固定 `mission_review_required=1`；SQLite schema 版本为 5。
+- 本功能上线后创建的 Run 固定 `mission_review_required=1`；该门禁引入时的 SQLite
+  schema 版本为 5。
   迁移前 Run 默认 0，继续按旧流程执行，不能对其追溯插入 Mission 门禁。
 - 每个新 Run 的每一版 Mission Artifact 提交后，`mission` 与 Run 必须停在
   `waiting_for_human`；未经人工确认的当前精确版本不得进入 Blueprint。
@@ -237,7 +239,7 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 
 ## 本地 DeepSeek 配置存储
 
-- SQLite schema 版本为 7；从 v6 可重复迁移，单行元数据仅保存固定 provider、
+- 本地配置存储引入时的 SQLite schema 版本为 7；从 v6 可重复迁移，单行元数据仅保存固定 provider、
   模型、修复状态和非敏感操作 token。Key 只存在当前 OS 用户的凭据库。
 - 默认凭据库后端只接受 macOS Keychain 或 Windows Credential Locker；其他后端
   一律视为不可用，不得回退到可能的明文后端。
@@ -259,6 +261,27 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
   API 固定监听 `127.0.0.1:8002`，Vite 固定 5176，Worker 与 API 由同一 OS 用户启动。
 - macOS 用 `scripts/start-agent.sh`，Windows 用 `scripts/start-agent.ps1`；不提供安装包、
   云端密钥管理、多用户服务或自动发布。真实系统凭据库和 DeepSeek 调用须单独手工验收。
+
+## 课程生成约束
+
+- 现行 SQLite schema 版本为 8，可从 v7 重复迁移。`intakes` 持久保存
+  `expected_chapters`、`min_effective_chars`、`token_limit`，`runs` 保存
+  `constraints_version`。迁移前 Run 固定为版本 0，不追溯执行新约束；新 Run 固定为版本 1。
+- 新 Run 默认期望 12 章、单章至少 12000 个有效字符，Token 默认不限制。三项约束属于
+  不可变 Intake，创建后无编辑入口；创建幂等哈希必须包含三项约束。
+- Blueprint 实际章节数与期望值相差不超过 1 时继续；超出后在 `batch_plan` 前以
+  `blueprint_chapter_deviation` 等待人工。`RESUME` 只接受当前精确 Blueprint 版本，
+  写入幂等的 `blueprint.chapter_deviation_accepted` 后继续。
+- 有效字符统计去除 Markdown 标记、HTML 标签和空白，保留代码内容。低于下限时产生绑定
+  精确 Lesson ArtifactRef 的 `lesson.effective_chars.minimum` 阻断 Finding，并以
+  `lesson_effective_chars_below_minimum` 等待人工；不得交给单行 Repair 自动扩写。
+- Token 只累计 Provider 返回的 `input_tokens + output_tokens`；缺失用量记为 `unknown`，
+  不估算。达到或超过阈值时允许当前 Graph 节点完成提交，在下一节点写入
+  `NodeExecution.STARTED` 前追加一次 `budget.token_exhausted`，以
+  `token_limit_reached` 不可恢复地停止 Run。普通 `RESUME` 和调用次数追加预算都不得绕过。
+- Token 阈值不改变既有 48/60 次 Provider 调用预算、质量返工预算、七步顺序或人工
+  release 权限。约束状态进入安全读取模型和证据索引，但不得复制 Intake、正文、Prompt、
+  模型原始响应或密钥。
 
 ## 代码规范
 
