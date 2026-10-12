@@ -23,6 +23,14 @@ class BudgetExceeded(ProviderError):
     code = "provider_budget_exceeded"
 
 
+class TokenLimitReached(RuntimeError):
+    def __init__(self, used: int, limit: int, next_node: str):
+        super().__init__("token_limit_reached")
+        self.used = used
+        self.limit = limit
+        self.next_node = next_node
+
+
 class BudgetSummary(BaseModel):
     used: int
     limit: int
@@ -33,6 +41,10 @@ class BudgetSummary(BaseModel):
     repair_used: int
     repair_limit: int
     repair_exhausted: bool
+    tokens_used: int
+    token_limit: int | None
+    token_usage_unknown: int
+    token_exhausted: bool
 
 
 class BudgetStore:
@@ -150,6 +162,9 @@ class BudgetStore:
                 "SELECT 1 FROM events WHERE run_id=? AND "
                 "type='budget.repair_exhausted' LIMIT 1", (run_id,),
             ).fetchone() is not None
+            tokens_used, token_limit, token_usage_unknown = self.token_state(
+                connection, run_id
+            )
         maximum = limit[0] if limit else DEFAULT_CALL_LIMIT
         return BudgetSummary(
             used=used, limit=maximum, warning_at=warning_threshold(maximum),
@@ -158,7 +173,33 @@ class BudgetStore:
             unknown=unknown or 0,
             repair_used=repair_used, repair_limit=3,
             repair_exhausted=repair_exhausted,
+            tokens_used=tokens_used,
+            token_limit=token_limit,
+            token_usage_unknown=token_usage_unknown,
+            token_exhausted=(
+                token_limit is not None and tokens_used >= token_limit
+            ),
         )
+
+    @staticmethod
+    def token_state(connection, run_id: str) -> tuple[int, int | None, int]:
+        policy = connection.execute(
+            "SELECT runs.constraints_version, intakes.token_limit FROM runs "
+            "JOIN intakes ON intakes.run_id=runs.id WHERE runs.id=?",
+            (run_id,),
+        ).fetchone()
+        if policy is None:
+            raise KeyError(run_id)
+        usage = connection.execute(
+            "SELECT COALESCE(SUM(CASE WHEN status!='RESERVED' THEN "
+            "COALESCE(input_tokens,0)+COALESCE(output_tokens,0) ELSE 0 END),0), "
+            "COALESCE(SUM(CASE WHEN status!='RESERVED' AND "
+            "(input_tokens IS NULL OR output_tokens IS NULL) THEN 1 ELSE 0 END),0) "
+            "FROM provider_calls WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        token_limit = policy["token_limit"] if policy["constraints_version"] == 1 else None
+        return usage[0], token_limit, usage[1]
 
 
 class BudgetedProvider:

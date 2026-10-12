@@ -203,6 +203,104 @@ def test_resume_accepts_exact_blueprint_chapter_deviation_once(tmp_path):
     )
 
 
+def test_token_limit_stops_before_next_node_and_cannot_resume(tmp_path):
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        CourseInput(
+            topic="变量",
+            audience="初学者",
+            goal="会解释变量",
+            language="zh",
+            token_limit=120,
+        ),
+        "token-stop-create",
+        enqueue_start=True,
+    )
+    with facts.connect() as connection:
+        connection.execute(
+            "UPDATE runs SET mission_review_required=0 WHERE id=?", (run.id,)
+        )
+    commands = ExecutionStore(facts.path)
+
+    class MeteredMission(FakeProvider):
+        def invoke(self, request):
+            response = super().invoke(request)
+            if request.role == "mission":
+                response.input_tokens = 100
+                response.output_tokens = 20
+            return response
+
+    worker = Worker(facts.path, provider=MeteredMission(), owner="worker-a")
+    assert worker.run_once()
+
+    stopped = facts.get_run(run.id)
+    assert stopped.status == "stopped"
+    assert stopped.stages[1].status == "succeeded"
+    assert stopped.stages[2].status == "stopped"
+    assert stopped.stages[2].failure_reason == "token_limit_reached"
+    assert commands.last_checkpoint(run.id)["position"] == "after_node"
+    with facts.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM node_executions WHERE run_id=? AND node='blueprint'",
+            (run.id,),
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM events WHERE run_id=? "
+            "AND type='budget.token_exhausted'",
+            (run.id,),
+        ).fetchone()[0] == 1
+
+    commands.accept(run.id, "RESUME", {}, "resume-token-stopped")
+    assert worker.run_once()
+    assert commands.list_commands(run.id)[-1].status == "REJECTED"
+    with facts.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM node_executions WHERE run_id=? AND node='blueprint'",
+            (run.id,),
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM events WHERE run_id=? "
+            "AND type='budget.token_exhausted'",
+            (run.id,),
+        ).fetchone()[0] == 1
+
+
+def test_token_limit_allows_restarting_the_uncommitted_current_node(tmp_path):
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        CourseInput(
+            topic="变量",
+            audience="初学者",
+            goal="会解释变量",
+            language="zh",
+            token_limit=10,
+        ),
+        "token-recovery-create",
+    )
+    commands = ExecutionStore(facts.path)
+    epoch = commands.acquire(run.id, "worker-a")
+    state = GraphState(run_id=run.id, current_node="mission")
+    commands.start_node(run.id, "mission", state, "worker-a", epoch)
+    with facts.connect() as connection:
+        connection.execute(
+            "INSERT INTO provider_calls(id,run_id,role,status,input_tokens,"
+            "output_tokens,started_at) VALUES (?,?,?,'SUCCEEDED',8,2,'now')",
+            ("current-node-call", run.id, "mission"),
+        )
+
+    commands.start_node(run.id, "mission", state, "worker-a", epoch)
+
+    with pytest.raises(RuntimeError, match="token_limit_reached"):
+        commands.start_node(
+            run.id,
+            "blueprint",
+            state.model_copy(update={"current_node": "blueprint"}),
+            "worker-a",
+            epoch,
+        )
+
 def test_crash_after_mission_artifact_reuses_committed_version(stores):
     facts, commands, run_id = stores
     commands.accept(run_id, "START", {}, "start-1")

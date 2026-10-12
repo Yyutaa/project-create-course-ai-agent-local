@@ -471,6 +471,11 @@ class FactStore:
                 if active:
                     active.status = "failed"
                     active.failure_reason = event["failure_reason"]
+            elif kind == "budget.token_exhausted":
+                run.status = "stopped"
+                if stage:
+                    stage.status = "stopped"
+                    stage.failure_reason = event["failure_reason"]
             elif kind == "run.stopped":
                 run.status = "stopped"
                 if stage:

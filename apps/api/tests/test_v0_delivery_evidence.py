@@ -133,8 +133,16 @@ def test_normal_delivery_path_requires_human_release_decision(tmp_path):
         CourseInput(topic="变量", audience="初学者", goal="解释变量", language="zh"),
         "create", enqueue_start=True,
     )
+    run.constraints_version = 0
     with facts.connect() as connection:
-        connection.execute("UPDATE runs SET mission_review_required=0 WHERE id=?", (run.id,))
+        connection.execute(
+            "UPDATE runs SET mission_review_required=0, constraints_version=0 WHERE id=?",
+            (run.id,),
+        )
+        connection.execute(
+            "UPDATE snapshots SET projection_json=? WHERE run_id=?",
+            (run.model_dump_json(), run.id),
+        )
     Worker(facts.path, provider=FakeProvider()).run_once()
     before = DeliveryStore(facts.path).read(run.id)
     assert next(item for item in before.paths if item.scenario == "normal").status == "not_observed"
@@ -185,6 +193,68 @@ def test_provider_budget_reserves_calls_and_requires_human_at_limit(tmp_path):
             "ORDER BY id", (run.id,),
         )]
     assert kinds == ["budget.warning", "budget.exhausted"]
+
+
+def test_budget_summary_reports_known_and_unknown_token_usage(tmp_path):
+    from app.v0.budget import BudgetStore
+
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        CourseInput(
+            topic="变量",
+            audience="初学者",
+            goal="解释变量",
+            language="zh",
+            token_limit=180,
+        ),
+        "token-summary",
+    )
+    with facts.connect() as connection:
+        connection.executemany(
+            "INSERT INTO provider_calls(id,run_id,role,status,input_tokens,"
+            "output_tokens,started_at) VALUES (?,?,?,'SUCCEEDED',?,?,'now')",
+            [
+                ("call-1", run.id, "mission", 100, 20),
+                ("call-2", run.id, "writer", None, None),
+                ("call-3", run.id, "reviewer", 50, 10),
+            ],
+        )
+
+    summary = BudgetStore(facts.path).summary(run.id)
+    assert summary.tokens_used == 180
+    assert summary.token_limit == 180
+    assert summary.token_usage_unknown == 1
+    assert summary.token_exhausted is True
+
+
+def test_legacy_run_does_not_activate_token_limit(tmp_path):
+    from app.v0.budget import BudgetStore
+
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        CourseInput(
+            topic="变量",
+            audience="初学者",
+            goal="解释变量",
+            language="zh",
+            token_limit=1,
+        ),
+        "legacy-token-summary",
+    )
+    with facts.connect() as connection:
+        connection.execute("UPDATE runs SET constraints_version=0 WHERE id=?", (run.id,))
+        connection.execute(
+            "INSERT INTO provider_calls(id,run_id,role,status,input_tokens,"
+            "output_tokens,started_at) VALUES (?,?,?,'SUCCEEDED',10,10,'now')",
+            ("legacy-call", run.id, "mission"),
+        )
+
+    summary = BudgetStore(facts.path).summary(run.id)
+    assert summary.tokens_used == 20
+    assert summary.token_limit is None
+    assert summary.token_exhausted is False
 
 
 def test_human_revision_can_approve_exactly_twenty_more_calls(tmp_path):

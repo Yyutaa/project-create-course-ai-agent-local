@@ -15,7 +15,7 @@ from app.v0.schemas import (
     GraphState,
 )
 from app.v0.sensitive import safe_error, safe_waiting_reason
-from app.v0.budget import BudgetStore, BudgetSummary
+from app.v0.budget import BudgetStore, BudgetSummary, TokenLimitReached
 
 CommandKind = Literal["START", "STOP", "RESUME", "REVISE", "MISSION_REVIEW"]
 CommandStatus = Literal["ACCEPTED", "CLAIMED", "APPLIED", "FAILED", "REJECTED"]
@@ -386,6 +386,21 @@ class ExecutionStore:
             ).fetchone()
             if control and control["stop_requested"]:
                 raise StopRequested("STOP 已受理，禁止开始下一节点")
+            tokens_used, token_limit, _ = BudgetStore.token_state(connection, run_id)
+            latest_attempt = connection.execute(
+                "SELECT status FROM node_executions WHERE run_id=? AND node=? "
+                "ORDER BY rowid DESC LIMIT 1",
+                (run_id, node),
+            ).fetchone()
+            recovering_started_node = bool(
+                latest_attempt and latest_attempt["status"] == "STARTED"
+            )
+            if (
+                token_limit is not None
+                and tokens_used >= token_limit
+                and not recovering_started_node
+            ):
+                raise TokenLimitReached(tokens_used, token_limit, node)
             attempt = connection.execute(
                 "SELECT COUNT(*) FROM node_executions WHERE run_id=? AND node=?",
                 (run_id, node),
@@ -507,6 +522,14 @@ class ExecutionStore:
 
     def prepare_resume(self, run_id: str, owner: str, epoch: int) -> None:
         run = self.facts.get_run(run_id)
+        with self.facts.connect() as connection:
+            token_stopped = connection.execute(
+                "SELECT 1 FROM events WHERE run_id=? "
+                "AND type='budget.token_exhausted' LIMIT 1",
+                (run_id,),
+            ).fetchone()
+        if token_stopped:
+            raise ValueError("Token 阈值已终止 Run，不能 RESUME")
         checkpoint = self.last_checkpoint(run_id)
         if checkpoint is None:
             raise ValueError("RESUME 缺少合法 checkpoint")

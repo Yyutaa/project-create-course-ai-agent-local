@@ -13,7 +13,7 @@ from app.v0.graph import (
 )
 from app.v0.local_config import LocalConfigStore
 from app.v0.provider import LocalConfiguredProvider
-from app.v0.budget import BudgetedProvider, BudgetStore
+from app.v0.budget import BudgetedProvider, BudgetStore, TokenLimitReached
 from app.v0.sensitive import safe_error
 from app.v0.runner import V0Runner
 from app.v0.schemas import GraphState
@@ -82,6 +82,32 @@ class Worker:
             lease_owner=self.owner, lease_epoch=epoch,
         )
 
+    def _mark_token_stopped(self, run_id: str, epoch: int, error: TokenLimitReached) -> None:
+        with self.runner.store.connect() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM events WHERE run_id=? "
+                "AND type='budget.token_exhausted' LIMIT 1",
+                (run_id,),
+            ).fetchone()
+        if exists:
+            return
+        run = self.runner.get(run_id)
+        run.status = "stopped"
+        stage_name = (
+            "quality" if error.next_node in ("repair", "verification")
+            else error.next_node
+        )
+        stage = next(item for item in run.stages if item.name == stage_name)
+        stage.status = "stopped"
+        stage.failure_reason = "token_limit_reached"
+        self.runner.store.record(
+            run,
+            "budget.token_exhausted",
+            stage_name,
+            lease_owner=self.owner,
+            lease_epoch=epoch,
+        )
+
     def _heartbeat(self, command_id: str, run_id: str, epoch: int, done: Event) -> None:
         while not done.wait(15):
             try:
@@ -124,6 +150,8 @@ class Worker:
                 )
             except StopRequested:
                 self._mark_stopped(run_id, epoch)
+            except TokenLimitReached as error:
+                self._mark_token_stopped(run_id, epoch, error)
             if self.runner.get(run_id).status == "failed":
                 raise RuntimeError("Graph 节点业务失败；不自动重试")
             return
@@ -168,6 +196,8 @@ class Worker:
             )
         except StopRequested:
             self._mark_stopped(run_id, epoch)
+        except TokenLimitReached as error:
+            self._mark_token_stopped(run_id, epoch, error)
         if self.runner.get(run_id).status == "failed":
             raise RuntimeError("Graph 节点业务失败；不自动重试")
 
