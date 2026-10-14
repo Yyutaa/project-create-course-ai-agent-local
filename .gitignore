@@ -25,6 +25,11 @@ dist/
 coverage/
 .docs/specs/
 
+# Imported reference content
+/courses/
+/docs/
+/implementation-guide-20-lessons/
+
 # Secrets and local configuration
 .env
 .env.*
