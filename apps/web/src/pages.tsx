@@ -12,6 +12,7 @@ import {
   canStartRun,
   canDecideRelease,
   canReviewMission,
+  canReviewQuality,
   courseCreationAction,
   courseProgressLabel,
   continuityLedgerLabels,
@@ -244,6 +245,7 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
   const [reason, setReason] = useState("");
   const [revisionText, setRevisionText] = useState("");
   const [missionFeedback, setMissionFeedback] = useState("");
+  const [qualityReason, setQualityReason] = useState("");
   const runQuery = useQuery({
     queryKey: ["run", runId],
     queryFn: () => api.run(runId!),
@@ -368,8 +370,44 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
       void queryClient.invalidateQueries({ queryKey: ["evidence", command.run_id] });
     },
   });
-  const busy = startMutation.isPending || releaseMutation.isPending || controlMutation.isPending || budgetMutation.isPending || missionReviewMutation.isPending;
-  const error = startMutation.error || releaseMutation.error || controlMutation.error || budgetMutation.error || missionReviewMutation.error || runQuery.error || contentQuery.error || executionQuery.error || evidenceQuery.error;
+  const qualityReviewMutation = useMutation({
+    mutationFn: async (action: "retry" | "accept") => {
+      const review = executionQuery.data?.quality_review;
+      if (!runId || !run || !canReviewQuality(run, executionQuery.data) || !review) {
+        throw new Error("Quality 人工处理状态已变化，请刷新后重试");
+      }
+      const acceptedReason = action === "accept" ? qualityReason.trim() : undefined;
+      if (action === "accept" && !acceptedReason) throw new Error("请填写风险接受说明");
+      const digest = acceptedReason
+        ? await crypto.subtle.digest("SHA-256", new TextEncoder().encode(acceptedReason))
+        : null;
+      const fingerprint = digest
+        ? Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
+        : "";
+      const slot = `quality-review:${runId}`;
+      const key = pendingKey(sessionStorage, slot, JSON.stringify({
+        action,
+        qualityRef: review.quality_ref,
+        lessonRef: review.lesson_ref,
+        checkpoint: review.checkpoint_id,
+        fingerprint,
+      }));
+      return api.reviewQuality(
+        runId, action, review.quality_ref, review.lesson_ref,
+        review.checkpoint_id, acceptedReason, key,
+      );
+    },
+    onSuccess: (command) => {
+      clearPendingKey(sessionStorage, `quality-review:${command.run_id}`);
+      setQualityReason("");
+      void queryClient.invalidateQueries({ queryKey: ["execution", command.run_id] });
+      void queryClient.invalidateQueries({ queryKey: ["run", command.run_id] });
+      void queryClient.invalidateQueries({ queryKey: ["snapshot", command.run_id] });
+      void queryClient.invalidateQueries({ queryKey: ["evidence", command.run_id] });
+    },
+  });
+  const busy = startMutation.isPending || releaseMutation.isPending || controlMutation.isPending || budgetMutation.isPending || missionReviewMutation.isPending || qualityReviewMutation.isPending;
+  const error = startMutation.error || releaseMutation.error || controlMutation.error || budgetMutation.error || missionReviewMutation.error || qualityReviewMutation.error || runQuery.error || contentQuery.error || executionQuery.error || evidenceQuery.error;
   const chapterDeviation = run?.stages.some(
     (stage) => stage.failure_reason === "blueprint_chapter_deviation",
   ) ?? false;
@@ -549,7 +587,8 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
             </ul>
             {run.status === "running" && <button disabled={busy} onClick={() => controlMutation.mutate("STOP")}>请求停止</button>}
             {canResumeRun(run, executionQuery.data) && (run.status === "stopped" || (run.status === "waiting_for_human" && !canDecideRelease(run)
-              && executionQuery.data?.mission_review?.status !== "pending")) && executionQuery.data?.checkpoint && (
+              && executionQuery.data?.mission_review?.status !== "pending"
+              && executionQuery.data?.quality_review?.status !== "pending")) && executionQuery.data?.checkpoint && (
               <div>
                 <label>人工修订说明
                   <textarea value={revisionText} onChange={(event) => setRevisionText(event.target.value)} />
@@ -557,6 +596,24 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
                 <button disabled={busy || !revisionText.trim()} onClick={() => controlMutation.mutate("REVISE")}>提交修订</button>
                 <button disabled={busy} onClick={() => controlMutation.mutate("RESUME")}>
                   {chapterDeviation ? "接受偏差并继续" : "继续执行"}
+                </button>
+              </div>
+            )}
+            {canReviewQuality(run, executionQuery.data) && executionQuery.data?.quality_review && (
+              <div className="quality-review-panel">
+                <h3>Quality 人工处理</h3>
+                <p>
+                  当前证据：quality v{executionQuery.data.quality_review.quality_ref.version}；
+                  Lesson v{executionQuery.data.quality_review.lesson_ref.version}。
+                </p>
+                <button disabled={busy} onClick={() => qualityReviewMutation.mutate("retry")}>
+                  重新检查
+                </button>
+                <label>风险接受说明
+                  <textarea value={qualityReason} onChange={(event) => setQualityReason(event.target.value)} />
+                </label>
+                <button disabled={busy || !qualityReason.trim()} onClick={() => qualityReviewMutation.mutate("accept")}>
+                  接受风险并继续
                 </button>
               </div>
             )}

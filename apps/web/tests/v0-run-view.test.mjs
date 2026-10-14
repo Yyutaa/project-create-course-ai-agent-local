@@ -8,6 +8,7 @@ import {
   courseCreationAction,
   canDecideRelease,
   canReviewMission,
+  canReviewQuality,
   canResumeRun,
   continuityLedgerLabels,
   budgetTokenLabel,
@@ -108,6 +109,76 @@ test("new Run stays gated until local config is ready", () => {
   assert.equal(canStartRun(undefined), false);
   assert.equal(canStartRun({ configured: false, error: "keyring_unavailable" }), false);
   assert.equal(canStartRun({ configured: true, error: null }), true);
+});
+
+test("quality review requires the current waiting checkpoint and exact refs", () => {
+  const run = {
+    status: "waiting_for_human",
+    stages: [
+      { name: "mission", status: "succeeded" },
+      { name: "quality", status: "waiting_for_human" },
+    ],
+  };
+  const execution = {
+    checkpoint: { id: "cp-1" },
+    commands: [],
+    quality_review: {
+      status: "pending",
+      checkpoint_id: "cp-1",
+      quality_ref: { artifact_id: "quality-1", version: 1 },
+      lesson_ref: { artifact_id: "lesson-1", version: 1 },
+    },
+  };
+
+  assert.equal(canReviewQuality(run, execution), true);
+  assert.equal(canReviewQuality(run, {
+    ...execution,
+    checkpoint: { id: "stale" },
+  }), false);
+});
+
+test("quality review API submits retry and accepted risk decisions", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (path, init) => {
+    calls.push({ path, init });
+    return new Response(JSON.stringify({
+      id: "command-1", run_id: "run-1", kind: "QUALITY_REVIEW",
+      status: "ACCEPTED", error: null,
+    }), { status: 202 });
+  };
+  const qualityRef = {
+    run_id: "run-1", artifact_id: "quality-1", version: 1,
+    kind: "quality", content_hash: "quality-hash",
+  };
+  const lessonRef = {
+    run_id: "run-1", artifact_id: "lesson-1", version: 1,
+    kind: "lesson", content_hash: "lesson-hash",
+  };
+  try {
+    await api.reviewQuality(
+      "run-1", "retry", qualityRef, lessonRef, "cp-1", undefined, "retry-key",
+    );
+    await api.reviewQuality(
+      "run-1", "accept", qualityRef, lessonRef, "cp-1", "人工接受", "accept-key",
+    );
+    assert.deepEqual(calls.map(({ path, init }) => [
+      path,
+      JSON.parse(init.body),
+      init.headers["Idempotency-Key"],
+    ]), [
+      ["/api/v0/runs/run-1/quality-review", {
+        action: "retry", quality_ref: qualityRef, lesson_ref: lessonRef,
+        expected_checkpoint_id: "cp-1",
+      }, "retry-key"],
+      ["/api/v0/runs/run-1/quality-review", {
+        action: "accept", quality_ref: qualityRef, lesson_ref: lessonRef,
+        expected_checkpoint_id: "cp-1", reason: "人工接受",
+      }, "accept-key"],
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("course creation action exposes its real execution state", () => {

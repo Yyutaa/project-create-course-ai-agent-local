@@ -163,7 +163,7 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 
 ## 本地 Worker 执行协议契约
 
-- `START`、`STOP`、`RESUME`、`REVISE` 是关联 Run 的持久 Command；状态为
+- `START`、`STOP`、`RESUME`、`REVISE`、`QUALITY_REVIEW` 是关联 Run 的持久 Command；状态为
   `ACCEPTED → CLAIMED → APPLIED/FAILED/REJECTED`。同 Run 的 Idempotency-Key
   与规范化 payload 绑定，同 key 异请求冲突。创建 Run 与 START Command 同一事务。
 - API 的 Run 启动和控制 POST 只返回 202 accepted，不执行 Graph；Worker 独立于 API 和
@@ -183,6 +183,11 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
   `STARTED` 必须被阻止。不得用强杀代替协作停止。RESUME 仅从合法停止/人工等待
   checkpoint 继续，不代表业务失败阶段自动重试。REVISE 持久保存有长度上限的人工
   输入并校验期望 checkpoint；release 决定仍由独立人工接口提交。
+- `QUALITY_REVIEW` 仅作用于 `quality=waiting_for_human` 且当前内部节点为 `quality`
+  的精确 checkpoint。`retry` 重新检查同一 Lesson Artifact；`accept` 必须携带人工说明，
+  绑定当前 Lesson 与 Quality Artifact 的精确版本和 hash，记录
+  `quality.risk_accepted` 后生成新的 Quality Artifact，并继续下一章或进入人工 release。
+  它不等同于模型 Gate 通过，也不得自动发布。通用 `REVISE` 文本不能替代该决定。
 - 读取模型组合 Command、当前 NodeExecution、最后 checkpoint、停止请求和等待人工原因；
   Snapshot 与前端缓存都不持有执行权。正常模型调用可能在崩溃后重复，保证的是
   已提交事实的幂等与旧租约围栏，不声称 Provider 调用 exactly-once。

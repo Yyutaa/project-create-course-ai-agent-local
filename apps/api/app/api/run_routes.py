@@ -68,6 +68,22 @@ class MissionReviewInput(BaseModel):
         return self
 
 
+class QualityReviewInput(BaseModel):
+    action: Literal["retry", "accept"]
+    quality_ref: ArtifactRef
+    lesson_ref: ArtifactRef
+    expected_checkpoint_id: str = Field(min_length=1)
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_reason(self) -> "QualityReviewInput":
+        if self.action == "accept" and not (self.reason or "").strip():
+            raise ValueError("接受 Quality 风险必须填写说明")
+        if self.action == "retry" and self.reason is not None:
+            raise ValueError("重新检查 Quality 不接受说明")
+        return self
+
+
 def _public_run(run: V0Run) -> V0Run:
     visible = run.model_copy(deep=True)
     visible.course_input.topic = "已隐藏"
@@ -162,6 +178,19 @@ def review_mission(
         raise HTTPException(status_code=409, detail="Mission 引用与 Run 不一致")
     return _accept_command(
         run_id, "MISSION_REVIEW", review.model_dump(exclude_none=True),
+        runner, idempotency_key,
+    )
+
+
+@router.post("/{run_id}/quality-review", status_code=202, response_model=CommandView)
+def review_quality(
+    run_id: str, review: QualityReviewInput,
+    runner: RunnerDep, idempotency_key: IdempotencyKey,
+) -> Command:
+    if review.quality_ref.run_id != run_id or review.lesson_ref.run_id != run_id:
+        raise HTTPException(status_code=409, detail="Quality 审批引用与 Run 不一致")
+    return _accept_command(
+        run_id, "QUALITY_REVIEW", review.model_dump(exclude_none=True),
         runner, idempotency_key,
     )
 

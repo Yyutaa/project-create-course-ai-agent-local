@@ -151,3 +151,16 @@ export function canReviewMission(
     && !execution.commands.some((command) =>
       command.kind === "MISSION_REVIEW" && (command.status === "ACCEPTED" || command.status === "CLAIMED"));
 }
+
+export function canReviewQuality(
+  run: Pick<V0Run, "status" | "stages">,
+  execution: Pick<ExecutionReadModel, "checkpoint" | "commands" | "quality_review"> | null | undefined,
+): boolean {
+  return run.status === "waiting_for_human"
+    && run.stages.find((stage) => stage.name === "quality")?.status === "waiting_for_human"
+    && execution?.quality_review?.status === "pending"
+    && execution.quality_review.checkpoint_id === execution.checkpoint?.id
+    && !execution.commands.some((command) =>
+      command.kind === "QUALITY_REVIEW"
+      && (command.status === "ACCEPTED" || command.status === "CLAIMED"));
+}

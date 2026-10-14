@@ -197,7 +197,7 @@ export type ArtifactFact = ArtifactSummary & {
 export type ExecutionCommand = {
   id: string;
   run_id: string;
-  kind: "START" | "STOP" | "RESUME" | "REVISE" | "MISSION_REVIEW";
+  kind: "START" | "STOP" | "RESUME" | "REVISE" | "MISSION_REVIEW" | "QUALITY_REVIEW";
   status: "ACCEPTED" | "CLAIMED" | "APPLIED" | "FAILED" | "REJECTED";
   error: string | null;
 };
@@ -215,6 +215,12 @@ export type ExecutionReadModel = {
     status: "pending" | "approved";
     mission_ref: ArtifactRef;
     checkpoint_id: string | null;
+  } | null;
+  quality_review: {
+    status: "pending";
+    quality_ref: ArtifactRef;
+    lesson_ref: ArtifactRef;
+    checkpoint_id: string;
   } | null;
   budget: {
     used: number; limit: number; warning_at: number;
@@ -310,5 +316,12 @@ export const api = {
     post<ExecutionCommand>(`/api/v0/runs/${encodeURIComponent(id)}/mission-review`, {
       action, mission_ref: missionRef, expected_checkpoint_id: checkpoint,
       ...(action === "revise" ? { feedback } : {}),
+    }, key),
+  reviewQuality: (id: string, action: "retry" | "accept", qualityRef: ArtifactRef,
+    lessonRef: ArtifactRef, checkpoint: string, reason: string | undefined, key: string) =>
+    post<ExecutionCommand>(`/api/v0/runs/${encodeURIComponent(id)}/quality-review`, {
+      action, quality_ref: qualityRef, lesson_ref: lessonRef,
+      expected_checkpoint_id: checkpoint,
+      ...(action === "accept" ? { reason } : {}),
     }, key),
 };

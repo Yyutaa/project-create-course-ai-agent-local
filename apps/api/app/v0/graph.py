@@ -558,6 +558,47 @@ class WorkflowNodes:
             self._ref(state, "blueprint"),
             lesson_ref,
         ]
+        if run.quality is not None:
+            prior_quality_ref = self.runner._source_refs(
+                state.run_id, ("quality",)
+            )[0]
+            if self.runner._has_artifact_event(
+                state.run_id, "quality.risk_accepted", prior_quality_ref
+            ):
+                summary = run.quality.model_copy(deep=True)
+                summary.status = "ready"
+                summary.checks.append("human:quality.risk_accepted:pass")
+                summary.limitations.append("当前章节质量风险已由人工明确接受")
+                self.runner._persist_system_artifact(
+                    state.run_id,
+                    "quality",
+                    summary,
+                    [*quality_sources, prior_quality_ref],
+                )
+                quality_ref = self.runner._source_refs(
+                    state.run_id, ("quality",)
+                )[0]
+                cursor = state.quality_cursor + 1
+                if cursor == len(run.blueprint.lessons):
+                    self.runner._mark_stage_succeeded(
+                        state.run_id,
+                        index,
+                        f"{cursor} 章质量 Gate 已通过人工风险接受",
+                    )
+                return {
+                    "current_node": "quality",
+                    "quality_cursor": cursor,
+                    "artifact_refs": {
+                        **state.artifact_refs,
+                        "quality": quality_ref,
+                    },
+                    "last_outcome": "succeeded",
+                    "exit_reason": (
+                        "all_lessons_ready"
+                        if cursor == len(run.blueprint.lessons)
+                        else "more_lessons"
+                    ),
+                }
         report = self._evaluate(state, lesson_ref)
         summary = self._quality_summary(run.quality, report)
         if any(item.status != "pass" for item in report.results):

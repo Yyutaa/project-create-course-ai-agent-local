@@ -6,6 +6,7 @@ from app.v0.execution import ExecutionStore
 from app.v0.schemas import CourseInput
 from app.v0.schemas import GraphState
 from app.v0.schemas import MissionDraft
+from app.v0.schemas import QualitySummary
 from app.v0.storage import FactStore
 from app.v0.provider import FakeProvider
 from app.v0.provider import AgentResponse
@@ -443,6 +444,89 @@ def test_business_failure_does_not_implicitly_retry_on_resume(stores):
     commands.accept(run_id, "RESUME", {}, "resume-1")
     worker.run_once()
     assert commands.list_commands(run_id)[1].status == "REJECTED"
+
+
+class ManualQualityProvider(FakeProvider):
+    def __init__(self, *, manual_calls: int | None = None):
+        super().__init__()
+        self.manual_calls = manual_calls
+        self.reviewer_calls = 0
+
+    def invoke(self, request):
+        if request.role == "reviewer":
+            self.reviewer_calls += 1
+            if self.manual_calls is None or self.reviewer_calls <= self.manual_calls:
+                return AgentResponse(role="reviewer", payload=QualitySummary(
+                    status="manual_review",
+                    checks=["需要人工核对"],
+                    language_risk="需要人工复读",
+                    limitations=["事实未核验"],
+                ).model_dump())
+        return super().invoke(request)
+
+
+def test_quality_review_accepts_exact_waiting_artifacts_and_reaches_release(stores):
+    facts, commands, run_id = stores
+    provider = ManualQualityProvider()
+    commands.accept(run_id, "START", {}, "start-1")
+    worker = Worker(facts.path, provider=provider, owner="worker-a")
+    worker.run_once()
+
+    review = commands.read_model(run_id).quality_review
+    assert review is not None
+    command = commands.accept(run_id, "QUALITY_REVIEW", {
+        "action": "accept",
+        "quality_ref": review.quality_ref.model_dump(mode="json"),
+        "lesson_ref": review.lesson_ref.model_dump(mode="json"),
+        "expected_checkpoint_id": review.checkpoint_id,
+        "reason": "人工确认当前风险可在发布前复核",
+    }, "quality-accept")
+
+    assert worker.run_once()
+    result = facts.get_run(run_id)
+    assert commands.list_commands(run_id)[-1].status == "APPLIED"
+    assert result.stages[5].status == "succeeded"
+    assert result.stages[6].status == "waiting_for_human"
+    assert result.quality is not None and result.quality.status == "ready"
+    with facts.connect() as connection:
+        event = connection.execute(
+            "SELECT artifact_id, artifact_version, input_summary FROM events "
+            "WHERE run_id=? AND type='quality.risk_accepted'",
+            (run_id,),
+        ).fetchone()
+    assert event["artifact_id"] == review.quality_ref.artifact_id
+    assert event["artifact_version"] == review.quality_ref.version
+    assert event["input_summary"] == "人工确认当前风险可在发布前复核"
+    assert command.kind == "QUALITY_REVIEW"
+
+
+def test_quality_review_retry_rechecks_the_same_lesson(stores):
+    facts, commands, run_id = stores
+    provider = ManualQualityProvider(manual_calls=1)
+    commands.accept(run_id, "START", {}, "start-1")
+    worker = Worker(facts.path, provider=provider, owner="worker-a")
+    worker.run_once()
+    review = commands.read_model(run_id).quality_review
+
+    commands.accept(run_id, "QUALITY_REVIEW", {
+        "action": "retry",
+        "quality_ref": review.quality_ref.model_dump(mode="json"),
+        "lesson_ref": review.lesson_ref.model_dump(mode="json"),
+        "expected_checkpoint_id": review.checkpoint_id,
+    }, "quality-retry")
+    worker.run_once()
+
+    result = facts.get_run(run_id)
+    assert provider.reviewer_calls == 3
+    assert result.stages[5].status == "succeeded"
+    assert result.stages[6].status == "waiting_for_human"
+    with facts.connect() as connection:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM events WHERE run_id=? "
+            "AND type='quality.retry_requested'",
+            (run_id,),
+        ).fetchone()[0]
+    assert count == 1
 
 
 def test_crash_after_first_lesson_reuses_it_and_completes_two_batches(stores):

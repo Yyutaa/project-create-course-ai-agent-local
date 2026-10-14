@@ -155,6 +155,29 @@ class Worker:
             if self.runner.get(run_id).status == "failed":
                 raise RuntimeError("Graph 节点业务失败；不自动重试")
             return
+        if command.kind == "QUALITY_REVIEW":
+            self.execution.apply_quality_review(command, self.owner, epoch)
+            state = self._resume_state(run_id)
+            if state is None:
+                return
+            checkpoint = self.execution.last_checkpoint(run_id)
+            recovery_effect = (
+                self.execution.event(run_id, checkpoint["event_id"])
+                if checkpoint and checkpoint["event_id"] else None
+            )
+            try:
+                self.runner.execute(
+                    run_id, state=state, execution=self.execution,
+                    owner=self.owner, epoch=epoch,
+                    recovery_effect=recovery_effect, command_id=command.id,
+                )
+            except StopRequested:
+                self._mark_stopped(run_id, epoch)
+            except TokenLimitReached as error:
+                self._mark_token_stopped(run_id, epoch, error)
+            if self.runner.get(run_id).status == "failed":
+                raise RuntimeError("Graph 节点业务失败；不自动重试")
+            return
         run = self.runner.get(run_id)
         if command.kind == "RESUME":
             if run.status not in ("stopped", "waiting_for_human"):

@@ -17,7 +17,9 @@ from app.v0.schemas import (
 from app.v0.sensitive import safe_error, safe_waiting_reason
 from app.v0.budget import BudgetStore, BudgetSummary, TokenLimitReached
 
-CommandKind = Literal["START", "STOP", "RESUME", "REVISE", "MISSION_REVIEW"]
+CommandKind = Literal[
+    "START", "STOP", "RESUME", "REVISE", "MISSION_REVIEW", "QUALITY_REVIEW"
+]
 CommandStatus = Literal["ACCEPTED", "CLAIMED", "APPLIED", "FAILED", "REJECTED"]
 
 
@@ -62,6 +64,13 @@ class MissionReviewView(BaseModel):
     checkpoint_id: str | None = None
 
 
+class QualityReviewView(BaseModel):
+    status: Literal["pending"]
+    quality_ref: ArtifactRef
+    lesson_ref: ArtifactRef
+    checkpoint_id: str
+
+
 class ExecutionReadModel(BaseModel):
     run_id: str
     commands: list[CommandView]
@@ -73,6 +82,7 @@ class ExecutionReadModel(BaseModel):
     waiting_reason: str | None
     budget: BudgetSummary
     mission_review: MissionReviewView | None = None
+    quality_review: QualityReviewView | None = None
 
 
 class ExecutionStore:
@@ -94,7 +104,9 @@ class ExecutionStore:
     ) -> Command:
         if not key:
             raise ValueError("Idempotency-Key 不能为空")
-        if kind not in ("START", "STOP", "RESUME", "REVISE", "MISSION_REVIEW"):
+        if kind not in (
+            "START", "STOP", "RESUME", "REVISE", "MISSION_REVIEW", "QUALITY_REVIEW"
+        ):
             raise ValueError("未知 Command 类型")
         encoded = _json(payload)
         digest = command_hash(kind, payload)
@@ -362,6 +374,114 @@ class ExecutionStore:
                 "SELECT * FROM mission_reviews WHERE id=?", (decision_id,)
             ).fetchone())
 
+    def apply_quality_review(
+        self, command: Command, owner: str, epoch: int
+    ) -> dict:
+        if command.kind != "QUALITY_REVIEW":
+            raise ValueError("Command 不是 Quality 审批")
+        action = command.payload.get("action")
+        reason = command.payload.get("reason")
+        if action not in ("retry", "accept"):
+            raise ValueError("Quality 审批动作无效")
+        if action == "accept" and (
+            not isinstance(reason, str) or not reason.strip() or len(reason) > 2000
+        ):
+            raise ValueError("Quality 风险接受说明必须为 1 至 2000 字符")
+        if action == "retry" and reason is not None:
+            raise ValueError("Quality 重新检查不接受说明")
+        try:
+            quality_ref = ArtifactRef.model_validate(command.payload["quality_ref"])
+            lesson_ref = ArtifactRef.model_validate(command.payload["lesson_ref"])
+            expected = command.payload["expected_checkpoint_id"]
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("Quality 审批引用不完整") from error
+        if not isinstance(expected, str) or not expected:
+            raise ValueError("Quality 审批 checkpoint 缺失")
+        now = _utc().isoformat()
+        with self.facts.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_lease(connection, command.run_id, owner, epoch)
+            claim = connection.execute(
+                "SELECT status, claimed_by FROM commands WHERE id=?", (command.id,)
+            ).fetchone()
+            if claim is None or claim["status"] != "CLAIMED" or (
+                claim["claimed_by"] != owner
+            ):
+                raise PermissionError("Command 已被其他 Worker 接管")
+            replay = connection.execute(
+                "SELECT id, type FROM events WHERE run_id=? AND request_key=?",
+                (command.run_id, command.id),
+            ).fetchone()
+            if replay:
+                return dict(replay)
+            run = self.facts._get_run(connection, command.run_id)
+            if run.status != "waiting_for_human" or (
+                run.stages[5].status != "waiting_for_human"
+            ):
+                raise ValueError("Run 未等待 Quality 人工处理")
+            checkpoint = connection.execute(
+                "SELECT id, position, state_json FROM checkpoints WHERE run_id=? "
+                "ORDER BY rowid DESC LIMIT 1",
+                (command.run_id,),
+            ).fetchone()
+            if (
+                checkpoint is None or checkpoint["id"] != expected
+                or checkpoint["position"] != "after_node"
+            ):
+                raise ValueError("Quality 审批 checkpoint 已过期")
+            state = GraphState.model_validate_json(checkpoint["state_json"])
+            if state.current_node != "quality":
+                raise ValueError("当前等待节点不支持 Quality 审批")
+            quality = connection.execute(
+                "SELECT artifact_id, version, content_hash FROM artifacts "
+                "WHERE run_id=? AND kind='quality' ORDER BY rowid DESC LIMIT 1",
+                (command.run_id,),
+            ).fetchone()
+            if (
+                quality_ref.run_id != command.run_id or quality_ref.kind != "quality"
+                or quality is None or quality["artifact_id"] != quality_ref.artifact_id
+                or quality["version"] != quality_ref.version
+                or quality["content_hash"] != quality_ref.content_hash
+            ):
+                raise ValueError("Quality 审批 Artifact 引用已过期")
+            if lesson_ref.run_id != command.run_id or lesson_ref.kind != "lesson":
+                raise ValueError("Quality 审批 Lesson 引用无效")
+            if run.blueprint is None or state.quality_cursor >= len(run.blueprint.lessons):
+                raise ValueError("Quality 审批缺少当前章节")
+            lesson_id = run.blueprint.lessons[state.quality_cursor].lesson_id
+            current_lesson = state.artifact_refs.get(f"lesson:{lesson_id}")
+            if current_lesson != lesson_ref:
+                raise ValueError("Quality 审批 Lesson 引用已过期")
+            event_type = (
+                "quality.risk_accepted"
+                if action == "accept" else "quality.retry_requested"
+            )
+            run.status = "running"
+            run.stages[5].status = "pending"
+            run.stages[5].failure_reason = None
+            event_id = connection.execute(
+                "INSERT INTO events(run_id, stage, type, status, input_summary, "
+                "artifact_id, artifact_version, request_key, request_hash, created_at) "
+                "VALUES (?, 'quality', ?, 'running', ?, ?, ?, ?, ?, ?)",
+                (
+                    command.run_id, event_type,
+                    reason.strip() if isinstance(reason, str) else None,
+                    quality_ref.artifact_id, quality_ref.version, command.id,
+                    command_hash(command.kind, command.payload), now,
+                ),
+            ).lastrowid
+            run.revision = event_id
+            connection.execute(
+                "UPDATE runs SET status='running', updated_at=? WHERE id=?",
+                (now, command.run_id),
+            )
+            connection.execute(
+                "UPDATE snapshots SET revision=?, projection_json=?, updated_at=? "
+                "WHERE run_id=?",
+                (event_id, run.model_dump_json(), now, command.run_id),
+            )
+            return {"id": event_id, "type": event_type}
+
     @staticmethod
     def _checkpoint(connection, run_id: str, execution_id: str | None,
                     position: str, state: GraphState, event_id: int | None = None) -> str:
@@ -617,6 +737,39 @@ class ExecutionStore:
                         ),
                         checkpoint_id=(checkpoint["id"] if checkpoint and not approved else None),
                     )
+        quality_review = None
+        if (
+            run.status == "waiting_for_human"
+            and run.stages[5].status == "waiting_for_human"
+            and checkpoint is not None
+            and checkpoint["position"] == "after_node"
+        ):
+            state = GraphState.model_validate_json(checkpoint["state_json"])
+            quality_artifacts = [
+                item for item in self.facts.list_artifacts(run_id)
+                if item.kind == "quality"
+            ]
+            if (
+                state.current_node == "quality" and quality_artifacts
+                and run.blueprint is not None
+                and state.quality_cursor < len(run.blueprint.lessons)
+            ):
+                lesson_id = run.blueprint.lessons[state.quality_cursor].lesson_id
+                lesson_ref = state.artifact_refs.get(f"lesson:{lesson_id}")
+                latest = quality_artifacts[-1]
+                if lesson_ref is not None:
+                    quality_review = QualityReviewView(
+                        status="pending",
+                        quality_ref=ArtifactRef(
+                            run_id=run_id,
+                            artifact_id=latest.artifact_id,
+                            version=latest.version,
+                            kind="quality",
+                            content_hash=latest.content_hash,
+                        ),
+                        lesson_ref=lesson_ref,
+                        checkpoint_id=checkpoint["id"],
+                    )
         return ExecutionReadModel.model_validate({
             "run_id": run_id,
             "commands": [CommandView.model_validate({
@@ -640,6 +793,7 @@ class ExecutionStore:
             ),
             "budget": BudgetStore(self.facts.path).summary(run_id),
             "mission_review": mission_review,
+            "quality_review": quality_review,
         })
 
     def last_checkpoint(self, run_id: str) -> dict | None:

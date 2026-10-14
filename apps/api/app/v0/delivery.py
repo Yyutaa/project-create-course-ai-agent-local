@@ -146,8 +146,11 @@ class DeliveryStore:
                 "SELECT id, type, CASE type "
                 "WHEN 'mission.approved' THEN 'approve' "
                 "WHEN 'mission.revision_requested' THEN 'revise' "
+                "WHEN 'quality.risk_accepted' THEN 'accept' "
+                "WHEN 'quality.retry_requested' THEN 'retry' "
                 "ELSE release_action END AS action FROM events WHERE run_id=? AND "
                 "type IN ('mission.approved','mission.revision_requested',"
+                "'quality.risk_accepted','quality.retry_requested',"
                 "'release.decided') ORDER BY id", (trace_id,),
             ).fetchall()
             budget_events = connection.execute(
