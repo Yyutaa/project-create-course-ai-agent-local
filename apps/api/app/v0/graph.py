@@ -20,6 +20,7 @@ from app.v0.runner import V0_QUALITY_LIMITATIONS
 from app.v0.schemas import (
     BLUEPRINT_CHAPTER_DEVIATION_REASON,
     GraphState,
+    LoopCounts,
     QualitySummary,
     ReleaseDecision,
     VerificationLink,
@@ -804,6 +805,37 @@ class WorkflowNodes:
         )
 
     @staticmethod
+    def _advance_finding_counts(state: GraphState, findings, next_finding) -> LoopCounts:
+        current = next(
+            (
+                item
+                for item in reversed(findings)
+                if item.finding_id == state.active_finding_id
+            ),
+            None,
+        )
+        if current is None or (
+            current.gate,
+            current.rule_id,
+            current.location.lesson_id,
+            current.location.line_start,
+            current.location.line_end,
+        ) != (
+            next_finding.gate,
+            next_finding.rule_id,
+            next_finding.location.lesson_id,
+            next_finding.location.line_start,
+            next_finding.location.line_end,
+        ):
+            return state.loop_counts
+        counts = dict(state.loop_counts.finding_attempts)
+        counts[next_finding.finding_id] = max(
+            counts.get(next_finding.finding_id, 0),
+            counts.get(current.finding_id, 0),
+        )
+        return state.loop_counts.model_copy(update={"finding_attempts": counts})
+
+    @staticmethod
     def _character_finding(findings, reference=None):
         return next(
             (
@@ -1006,7 +1038,13 @@ class WorkflowNodes:
             )
             return {"current_node": "verification", "last_outcome": "waiting_for_human"}
         finding = report.findings[0] if report.findings else None
-        if finding is None or not self._has_repair_budget(state, state.active_finding_id):
+        next_counts = (
+            self._advance_finding_counts(state, summary.evidence_findings, finding)
+            if finding is not None
+            else state.loop_counts
+        )
+        next_state = state.model_copy(update={"loop_counts": next_counts})
+        if finding is None or not self._has_repair_budget(next_state, finding.finding_id):
             self.runner._mark_waiting(
                 state.run_id,
                 index,
@@ -1023,6 +1061,8 @@ class WorkflowNodes:
             "current_node": "verification",
             "last_outcome": "succeeded",
             "exit_reason": "repair_needed",
+            "active_finding_id": finding.finding_id,
+            "loop_counts": next_counts,
             "artifact_refs": {
                 **state.artifact_refs,
                 "quality": self.runner._source_refs(state.run_id, ("quality",))[0],
@@ -1071,11 +1111,35 @@ class WorkflowNodes:
                 "current_node": "verification",
                 "last_outcome": "waiting_for_human",
             }
+        finding = next(
+            (
+                item
+                for item in run.quality.evidence_findings
+                if item.artifact_ref == candidate_ref
+            ),
+            None,
+        )
+        next_counts = (
+            self._advance_finding_counts(state, run.quality.evidence_findings, finding)
+            if finding is not None
+            else state.loop_counts
+        )
+        next_state = state.model_copy(update={"loop_counts": next_counts})
+        if finding is None or not self._has_repair_budget(next_state, finding.finding_id):
+            self.runner._mark_waiting(
+                state.run_id, 5, "Candidate 未通过独立验证，需人工处理"
+            )
+            return {
+                "current_node": "verification",
+                "last_outcome": "waiting_for_human",
+            }
         return {
             "current_node": "verification",
             "last_outcome": "succeeded",
             "exit_reason": "repair_needed",
             "artifact_refs": state.artifact_refs,
+            "active_finding_id": finding.finding_id,
+            "loop_counts": next_counts,
         }
 
     @staticmethod

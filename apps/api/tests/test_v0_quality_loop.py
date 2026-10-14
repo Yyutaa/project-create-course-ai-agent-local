@@ -356,6 +356,83 @@ class RepairingProvider(FakeProvider):
         return super().invoke(request)
 
 
+class AdvancingFindingProvider(FakeProvider):
+    def __init__(self):
+        super().__init__()
+        self.humanizer_calls = 0
+        self.repair_source_versions = []
+
+    def invoke(self, request):
+        if request.role == "writer":
+            response = super().invoke(request)
+            response.payload["markdown"] = (
+                "# 标题\n\n面向开发。\n\n执行操作。\n\n练习：复述本章内容。"
+            )
+            return response
+        if request.role == "reviewer" and request.goal.startswith("humanizer"):
+            self.humanizer_calls += 1
+            findings = {
+                1: [
+                    {
+                        "code": "audience-reference",
+                        "category": "language",
+                        "severity": "minor",
+                        "evidence": "面向开发。",
+                        "recommendation": "改为“面向开发者。”",
+                    }
+                ],
+                2: [
+                    {
+                        "code": "verb-object",
+                        "category": "language",
+                        "severity": "minor",
+                        "evidence": "执行操作。",
+                        "recommendation": "改为“执行这项操作。”",
+                    }
+                ],
+                3: [],
+            }[self.humanizer_calls]
+            return AgentResponse(
+                role="reviewer",
+                payload={
+                    "status": "ready" if not findings else "manual_review",
+                    "checks": ["中文表达检查"],
+                    "findings": findings,
+                    "language_risk": "无" if not findings else "存在局部表达问题",
+                    "limitations": ["仅检查中文表达"],
+                },
+            )
+        if request.role == "repair":
+            lesson_input = next(item for item in request.inputs if item.kind == "lesson")
+            self.repair_source_versions.append(lesson_input.reference.version)
+            replacement = (
+                "面向开发者。"
+                if len(self.repair_source_versions) == 1
+                else "执行这项操作。"
+            )
+            response = super().invoke(request)
+            response.payload["markdown"] = replacement
+            return response
+        return super().invoke(request)
+
+
+def test_failed_verification_advances_to_candidate_finding(tmp_path):
+    provider = AdvancingFindingProvider()
+    runner = V0Runner(provider, FactStore(tmp_path / "facts.sqlite3"))
+    run = runner.create(
+        CourseInput(topic="Python", audience="初学者", goal="变量", language="zh"),
+        request_key="advance-candidate-finding",
+    )
+
+    execute_legacy(runner, run.id)
+
+    result = runner.get(run.id)
+    assert provider.repair_source_versions == [1, 2]
+    assert "面向开发者。" in result.lesson.markdown
+    assert "执行这项操作。" in result.lesson.markdown
+    assert result.stages[5].status == "succeeded"
+
+
 def test_repair_candidate_requires_independent_verification(tmp_path):
     provider = RepairingProvider("# 修好的标题")
     runner = V0Runner(provider, FactStore(tmp_path / "facts.sqlite3"))

@@ -21,7 +21,10 @@ from app.v0.schemas import (
     BlueprintDraft,
     BlueprintLesson,
     CourseInput,
+    Finding,
+    FindingLocation,
     GraphState,
+    LoopCounts,
     QualitySummary,
     ReleaseDecision,
 )
@@ -353,6 +356,69 @@ def test_recover_verification_keeps_character_shortage_out_of_repair():
     assert runner.get(run.id).stages[5].failure_reason == (
         "lesson_effective_chars_below_minimum"
     )
+
+
+def test_recover_verification_advances_to_candidate_finding():
+    runner = V0Runner(FakeProvider())
+    run = runner.create(COURSE)
+    candidate_ref = ArtifactRef(
+        run_id=run.id,
+        artifact_id="lesson-1",
+        version=2,
+        kind="lesson",
+        content_hash="candidate-hash",
+    )
+    quality_ref = ArtifactRef(
+        run_id=run.id,
+        artifact_id="quality-1",
+        version=2,
+        kind="quality",
+        content_hash="quality-hash",
+    )
+    next_finding = Finding(
+        finding_id="candidate-finding",
+        run_id=run.id,
+        gate="humanizer",
+        rule_id="language.next",
+        artifact_ref=candidate_ref,
+        location=FindingLocation(
+            lesson_id="lesson-1",
+            line_start=2,
+            line_end=2,
+            excerpt_hash="excerpt-hash",
+        ),
+        category="language",
+        severity="minor",
+        evidence="需要修订",
+        expected="改为自然表达",
+    )
+    runner._runs[run.id].quality = QualitySummary(
+        status="manual_review",
+        checks=["humanizer:language.next:fail"],
+        language_risk="存在局部表达问题",
+        limitations=["仅检查中文表达"],
+        evidence_findings=[next_finding],
+    )
+    state = GraphState(
+        run_id=run.id,
+        current_node="verification",
+        active_finding_id="original-finding",
+        artifact_refs={"candidate": candidate_ref, "quality": quality_ref},
+        loop_counts=LoopCounts(
+            repair_attempts=1,
+            finding_attempts={"original-finding": 1},
+        ),
+    )
+
+    result = WorkflowNodes(runner).recover_verification(state, {
+        "type": "artifact.created",
+        "artifact_id": quality_ref.artifact_id,
+        "artifact_version": quality_ref.version,
+    })
+
+    assert result["last_outcome"] == "succeeded"
+    assert result["exit_reason"] == "repair_needed"
+    assert result["active_finding_id"] == "candidate-finding"
 
 
 def state(**updates):
