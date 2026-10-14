@@ -9,7 +9,7 @@ from app.v0.quality_loop import (
     make_repair_task,
     review_gate,
 )
-from app.v0.provider import AgentInput, FakeProvider
+from app.v0.provider import AgentInput, AgentResponse, FakeProvider
 from app.v0.runner import V0Runner
 from app.v0.storage import FactStore
 from app.v0.graph import WorkflowNodes
@@ -215,6 +215,82 @@ def test_model_gates_have_separate_instructions_and_humanizer_sees_only_lesson()
     assert "教学" in " ".join(provider.requests[0].instructions)
     assert "表达" in " ".join(provider.requests[1].instructions)
     assert [item.kind for item in provider.requests[1].inputs] == ["lesson"]
+
+
+def test_unlocatable_reviewer_finding_becomes_manual_gate_error():
+    class UnlocatableReviewer(FakeProvider):
+        def invoke(self, request):
+            if request.role == "reviewer":
+                return AgentResponse(role="reviewer", payload={
+                    "status": "manual_review",
+                    "checks": ["练习需要加强"],
+                    "findings": [{
+                        "code": "teaching.practice",
+                        "category": "teaching",
+                        "severity": "major",
+                        "evidence": "正文虽然解释概念，但缺少分步练习",
+                        "recommendation": "增加一组分步练习",
+                    }],
+                    "language_risk": "尚未检查",
+                    "limitations": ["事实未核验"],
+                })
+            return super().invoke(request)
+
+    markdown = "# 标题\n\n这里解释概念，也提供了一道练习。"
+    report = review_gate(
+        V0Runner(UnlocatableReviewer()),
+        "rubric",
+        LESSON_REF,
+        "lesson-1",
+        markdown,
+        [AgentInput(
+            kind="lesson",
+            reference=LESSON_REF,
+            content={"markdown": markdown},
+        )],
+    )
+
+    assert report.results[0].status == "error"
+    assert report.results[0].rule_id == "rubric.evidence_location"
+    assert report.findings == []
+
+
+def test_exact_reviewer_evidence_still_creates_a_precise_finding():
+    class ExactReviewer(FakeProvider):
+        def invoke(self, request):
+            if request.role == "reviewer":
+                return AgentResponse(role="reviewer", payload={
+                    "status": "manual_review",
+                    "checks": ["练习需要加强"],
+                    "findings": [{
+                        "code": "teaching.practice",
+                        "category": "teaching",
+                        "severity": "major",
+                        "evidence": "提供了一道练习",
+                        "recommendation": "增加一组分步练习",
+                    }],
+                    "language_risk": "尚未检查",
+                    "limitations": ["事实未核验"],
+                })
+            return super().invoke(request)
+
+    markdown = "# 标题\n\n这里解释概念，也提供了一道练习。"
+    report = review_gate(
+        V0Runner(ExactReviewer()),
+        "rubric",
+        LESSON_REF,
+        "lesson-1",
+        markdown,
+        [AgentInput(
+            kind="lesson",
+            reference=LESSON_REF,
+            content={"markdown": markdown},
+        )],
+    )
+
+    assert report.results[0].status == "fail"
+    assert report.findings[0].location.line_start == 3
+    assert report.findings[0].evidence == "提供了一道练习"
 
 
 def test_repair_task_contains_only_exact_problem_line_and_patch_keeps_other_lines():

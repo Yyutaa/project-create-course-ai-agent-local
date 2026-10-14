@@ -179,6 +179,8 @@ def review_gate(
         instructions = [
             "只判断教学目标、解释和练习是否对应；逐项写出正文证据。",
             "事实来源不足时要求人工复核，不得猜测已核验。",
+            "Finding.evidence 必须逐字复制正文单个物理行中的连续文本。",
+            "无法精确定位时返回 manual_review 且不要生成 Finding。",
         ]
     else:
         inputs = [
@@ -191,6 +193,8 @@ def review_gate(
         instructions = [
             "按 humanizer-zh 只检查中文表达；只能产生 language Finding。",
             "不得判断事实、教学、构建或 release。",
+            "Finding.evidence 必须逐字复制正文单个物理行中的连续文本。",
+            "无法精确定位时返回 manual_review 且不要生成 Finding。",
         ]
     response = runner.provider.invoke(
         AgentRequest(
@@ -228,7 +232,18 @@ def review_gate(
             None,
         )
         if match is None:
-            raise ProviderError("Reviewer Finding 缺少可定位的正文证据")
+            return GateReport(
+                [
+                    GateResult(
+                        gate=gate,
+                        status="error",
+                        rule_id=f"{gate}.evidence_location",
+                        evidence="Reviewer Finding 无法绑定当前 Lesson 的单行证据",
+                        artifact_ref=reference,
+                    )
+                ],
+                [],
+            )
         number, excerpt = match
         findings.append(
             Finding(

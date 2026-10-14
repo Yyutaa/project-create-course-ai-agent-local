@@ -156,7 +156,12 @@ class ReviewFinding(BaseModel):
     code: NonEmptyText
     category: Literal["structure", "teaching", "language", "fact"]
     severity: Literal["blocker", "major", "minor"]
-    evidence: NonEmptyText
+    evidence: NonEmptyText = Field(
+        description=(
+            "必须逐字复制当前 Lesson 单个物理行中的连续文本；不得概括、拼接多行或"
+            "使用省略号。无法提供精确摘录时不要生成 Finding。"
+        )
+    )
     recommendation: NonEmptyText
 
 
