@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
+from app.catalog import CatalogError
 from app.v0.provider import LocalConfiguredProvider
 from app.v0.local_config import ConfigError, LocalConfigStore
 from app.v0.runner import V0Runner
@@ -224,6 +225,22 @@ def decide_release(
         raise HTTPException(status_code=404, detail="Run 不存在") from error
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.post("/{run_id}/publish", response_model=V0Run)
+def publish_run(
+    run_id: str,
+    runner: RunnerDep,
+    idempotency_key: IdempotencyKey,
+) -> V0Run:
+    try:
+        return _public_run(runner.publish(run_id, idempotency_key))
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Run 不存在") from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except CatalogError as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
 
 
 @router.get("/{run_id}/artifacts", response_model=ArtifactList)

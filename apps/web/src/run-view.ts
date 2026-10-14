@@ -139,6 +139,10 @@ export function canDecideRelease(run: Pick<V0Run, "status" | "stages">): boolean
     && run.stages.find((stage) => stage.name === "release")?.status === "waiting_for_human";
 }
 
+export function canPublish(run: Pick<V0Run, "status">): boolean {
+  return run.status === "ready_for_release";
+}
+
 export function canReviewMission(
   run: Pick<V0Run, "status" | "stages">,
   execution: Pick<ExecutionReadModel, "checkpoint" | "commands" | "mission_review"> | null | undefined,

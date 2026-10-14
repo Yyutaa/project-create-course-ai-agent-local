@@ -46,7 +46,9 @@ Key 保存在当前操作系统账号的凭据库，SQLite 只保存模型等非
 - Worker：同一脚本启动的独立本地进程，没有 HTTP 端口。
 
 API 的 Run 启动 POST 只持久受理 Command 并返回 202；Worker 在后台执行。
-关闭浏览器或重启 API 不会转移执行权。`release` 仍由人决定，不自动发布。
+关闭浏览器或重启 API 不会转移执行权。`release` 仍由人决定：先「准备发布」进入
+`ready_for_release`，再由人显式点击「发布课程」，系统才把课程物化到
+`courses/published/<slug>/` 并写入 `courses/catalog.json`；未点击发布不会产生任何发布产物。
 保存或清除配置后无需重启 Worker，改动影响下一次模型调用；同一 Run 可能跨配置。
 「保存成功」只表示本机安全存储完成，不证明 Key 有效、余额足够或 DeepSeek 可用。
 启动脚本只监听本机回环地址，不要把本项目直接暴露到局域网或公网。

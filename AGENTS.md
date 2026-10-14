@@ -65,6 +65,11 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
   `LLM_MODEL`、`DEEPSEEK_API_KEY`。密钥只留在后端环境，不进入前端、响应或仓库。
 - `quality=ready` 后 Graph 必须停在 `release=waiting_for_human`。人工选择
   `prepare` 只得到 `ready_for_release`，不实际发布；选择 `stop` 得到 `stopped`。
+- 发布是 `prepare` 之后独立的显式人工动作：只有人工提交
+  `POST /api/v0/runs/{run_id}/publish`，系统才把课程物化到
+  `courses/published/<slug>/`（`course.json`、`lessons/*.md`、`index.html`）、把条目写入
+  `courses/catalog.json`，Run 进入 `published` 并从「我的课程」草稿列表移出；不满足
+  `ready_for_release` 或存在未生成章节时拒绝，且沿用 `Idempotency-Key` 幂等。
 - V0 用 SQLite 保留 Course、Run、Intake、Artifact、Event、Snapshot 和执行协议事实；
   页面刷新、API 重启后凭 Run ID 重新读取，Worker 以有效 lease 接管未完成执行。
 

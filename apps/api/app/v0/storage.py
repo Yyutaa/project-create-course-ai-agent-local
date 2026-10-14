@@ -20,6 +20,7 @@ from app.v0.schemas import (
     CourseChapter,
     CourseInput,
     GraphState,
+    Publication,
     ReleaseDecision,
     RunContent,
     SnapshotRecord,
@@ -69,25 +70,32 @@ class FactStore:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version >= 8:
+            if version >= 9:
+                return
+            if version == 8:
+                self._migrate_v9(connection)
                 return
             if version == 7:
                 self._migrate_v8(connection)
+                self._migrate_v9(connection)
                 return
             if version == 6:
                 self._migrate_v7(connection)
                 self._migrate_v8(connection)
+                self._migrate_v9(connection)
                 return
             if version == 5:
                 self._migrate_v6(connection)
                 self._migrate_v7(connection)
                 self._migrate_v8(connection)
+                self._migrate_v9(connection)
                 return
             if version == 4:
                 self._migrate_v5(connection)
                 self._migrate_v6(connection)
                 self._migrate_v7(connection)
                 self._migrate_v8(connection)
+                self._migrate_v9(connection)
                 return
             if version == 3:
                 self._migrate_v4(connection)
@@ -95,6 +103,7 @@ class FactStore:
                 self._migrate_v6(connection)
                 self._migrate_v7(connection)
                 self._migrate_v8(connection)
+                self._migrate_v9(connection)
                 return
             if version == 0:
                 connection.execute(
@@ -188,6 +197,7 @@ class FactStore:
             self._migrate_v6(connection)
             self._migrate_v7(connection)
             self._migrate_v8(connection)
+            self._migrate_v9(connection)
 
     @staticmethod
     def _migrate_v4(connection: sqlite3.Connection) -> None:
@@ -283,6 +293,16 @@ class FactStore:
                     "INTEGER CHECK(token_limit IS NULL OR token_limit > 0)"
                 )
         connection.execute("PRAGMA user_version=8")
+
+    @staticmethod
+    def _migrate_v9(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS publications (run_id TEXT PRIMARY KEY "
+            "REFERENCES runs(id), course_id TEXT NOT NULL, slug TEXT NOT NULL UNIQUE, "
+            "href TEXT NOT NULL, published_at TEXT NOT NULL, "
+            "catalog_entry_json TEXT NOT NULL)"
+        )
+        connection.execute("PRAGMA user_version=9")
 
     def mission_review_required(self, run_id: str) -> bool:
         with self.connect() as connection:
@@ -474,6 +494,11 @@ class FactStore:
                     "succeeded" if event["release_action"] == "prepare" else "stopped"
                 )
                 run.stages[-1].output_summary = event["output_summary"] or ""
+            elif kind == "release.published":
+                run.status = "published"
+                run.stages[-1].status = "succeeded"
+                run.stages[-1].output_summary = event["output_summary"] or ""
+                run.publication = self._publication(connection, run_id)
             elif kind == "run.interrupted":
                 run.status = "failed"
                 active = next(
@@ -505,6 +530,20 @@ class FactStore:
                 run.stages[1].failure_reason = None
             run.revision = event["id"]
         return run
+
+    @staticmethod
+    def _publication(connection: sqlite3.Connection, run_id: str) -> Publication | None:
+        row = connection.execute(
+            "SELECT slug, href, published_at FROM publications WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        return (
+            Publication(
+                slug=row["slug"], href=row["href"], published_at=row["published_at"]
+            )
+            if row
+            else None
+        )
 
     def latest_mission_review(self, run_id: str) -> dict | None:
         with self.connect() as connection:
@@ -749,6 +788,77 @@ class FactStore:
     def decision_hash(self, decision: ReleaseDecision) -> str:
         return _hash(decision.model_dump())
 
+    def publication_replay(self, run_id: str, key: str) -> V0Run | None:
+        with self.connect() as connection:
+            event = connection.execute(
+                "SELECT request_hash FROM events WHERE run_id=? AND request_key=? "
+                "AND type='release.published'",
+                (run_id, key),
+            ).fetchone()
+            if event is None:
+                return None
+            if event["request_hash"] != command_hash("PUBLISH", {}):
+                raise ValueError("Idempotency-Key 已用于其他发布请求")
+            return self._get_run(connection, run_id)
+
+    def publication_for_run(self, run_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM publications WHERE run_id=?", (run_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def publication_slug_exists(self, slug: str) -> bool:
+        with self.connect() as connection:
+            return connection.execute(
+                "SELECT 1 FROM publications WHERE slug=?", (slug,)
+            ).fetchone() is not None
+
+    def record_publication(
+        self,
+        run: V0Run,
+        *,
+        slug: str,
+        href: str,
+        entry: dict,
+        request_key: str,
+        request_hash: str,
+    ) -> V0Run:
+        now = _now()
+        run.status = "published"
+        run.stages[-1].status = "succeeded"
+        run.stages[-1].output_summary = f"已发布课程：{slug}"
+        run.publication = Publication(slug=slug, href=href, published_at=now)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "INSERT OR IGNORE INTO publications(run_id, course_id, slug, href, "
+                "published_at, catalog_entry_json) VALUES (?, ?, ?, ?, ?, ?)",
+                (run.id, run.course_id, slug, href, now, _json(entry)),
+            )
+            run.revision = connection.execute(
+                "INSERT INTO events(run_id, stage, type, status, output_summary, "
+                "request_key, request_hash, created_at) "
+                "VALUES (?, 'release', 'release.published', 'published', ?, ?, ?, ?)",
+                (
+                    run.id,
+                    run.stages[-1].output_summary,
+                    request_key,
+                    request_hash,
+                    now,
+                ),
+            ).lastrowid
+            connection.execute(
+                "UPDATE runs SET status=?, updated_at=? WHERE id=?",
+                (run.status, now, run.id),
+            )
+            connection.execute(
+                "UPDATE snapshots SET revision=?, projection_json=?, updated_at=? "
+                "WHERE run_id=?",
+                (run.revision, run.model_dump_json(), now, run.id),
+            )
+        return run
+
     def list_courses(self) -> list[CourseProgress]:
         with self.connect() as connection:
             rows = connection.execute(
@@ -756,6 +866,7 @@ class FactStore:
                 "runs.id AS run_id FROM courses JOIN runs ON runs.id = ("
                 "SELECT id FROM runs AS latest WHERE latest.course_id=courses.id "
                 "ORDER BY created_at DESC, id DESC LIMIT 1) "
+                "WHERE runs.id NOT IN (SELECT run_id FROM publications) "
                 "ORDER BY courses.created_at DESC, courses.id"
             ).fetchall()
             courses = []

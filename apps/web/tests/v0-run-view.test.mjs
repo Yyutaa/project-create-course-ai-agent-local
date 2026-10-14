@@ -7,6 +7,7 @@ import {
   canStartRun,
   courseCreationAction,
   canDecideRelease,
+  canPublish,
   canReviewMission,
   canReviewQuality,
   canResumeRun,
@@ -544,6 +545,13 @@ test("release controls appear only at the release human gate", () => {
     false,
   );
   assert.equal(canDecideRelease({ status: "ready_for_release", stages }), false);
+});
+
+test("publish is offered only after the human prepared the release", () => {
+  assert.equal(canPublish({ status: "waiting_for_human" }), false);
+  assert.equal(canPublish({ status: "ready_for_release" }), true);
+  assert.equal(canPublish({ status: "published" }), false);
+  assert.equal(canPublish({ status: "stopped" }), false);
 });
 
 test("continuity ledger labels expose lesson identity and summary", () => {

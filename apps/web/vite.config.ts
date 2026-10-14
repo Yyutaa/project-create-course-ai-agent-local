@@ -11,6 +11,7 @@ export default defineConfig(({ mode }) => {
       proxy: {
         "/api": env.VITE_API_TARGET || "http://127.0.0.1:8002",
         "/course-example": env.VITE_API_TARGET || "http://127.0.0.1:8002",
+        "/published": env.VITE_API_TARGET || "http://127.0.0.1:8002",
       },
     },
   };

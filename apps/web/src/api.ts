@@ -54,7 +54,7 @@ export type V0Run = {
   revision: number;
   artifacts: ArtifactSummary[];
   course_input: CourseInput;
-  status: "running" | "failed" | "waiting_for_human" | "ready_for_release" | "stopped";
+  status: "running" | "failed" | "waiting_for_human" | "ready_for_release" | "stopped" | "published";
   stages: StageRecord[];
   mission: { audience: string; learning_goal: string; scope: string; stop_conditions: string[] } | null;
   blueprint: {
@@ -95,6 +95,7 @@ export type V0Run = {
     resolved_finding_ids?: string[];
   } | null;
   release_decision: { action: "prepare" | "stop"; reason: string } | null;
+  publication: { slug: string; href: string; published_at: string } | null;
 };
 
 export type AgentRole = "mission" | "blueprint" | "writer" | "reviewer" | "repair";
@@ -297,6 +298,8 @@ export const api = {
   runContent: (id: string) => request<RunContent>(`/api/v0/runs/${encodeURIComponent(id)}/content`),
   decideRelease: (id: string, action: "prepare" | "stop", reason: string, key: string) =>
     post<V0Run>(`/api/v0/runs/${encodeURIComponent(id)}/release`, { action, reason }, key),
+  publishRun: (id: string, key: string) =>
+    post<V0Run>(`/api/v0/runs/${encodeURIComponent(id)}/publish`, {}, key),
   courseFacts: () => request<{ items: CourseProgress[] }>("/api/v0/courses"),
   courseFact: (id: string) => request<CourseFact>(`/api/v0/courses/${encodeURIComponent(id)}`),
   snapshot: (id: string) => request<{ run_id: string; revision: number; run: V0Run }>(`/api/v0/runs/${encodeURIComponent(id)}/snapshot`),

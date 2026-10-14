@@ -10,7 +10,7 @@ from app.api.course_routes import router as course_router
 from app.api.fact_routes import router as fact_router
 from app.api.run_routes import artifact_router, router as run_router
 from app.api.system_routes import router as system_router
-from app.catalog import EXAMPLE_COURSE_ROOT
+from app.catalog import EXAMPLE_COURSE_ROOT, PUBLISHED_ROOT
 
 
 app = FastAPI(title="AI Course Studio API", version="0.1.0")
@@ -23,7 +23,11 @@ app.add_middleware(
 )
 
 LOCAL_ORIGINS = {"http://localhost:5176", "http://127.0.0.1:5176"}
-LOCAL_HOSTS = {"localhost:5176", "127.0.0.1:5176", "localhost:8002", "127.0.0.1:8002"}
+LOCAL_HOSTS = {
+    "localhost:5176", "127.0.0.1:5176",
+    "localhost:8002", "127.0.0.1:8002",
+    "localhost:8003", "127.0.0.1:8003",
+}
 
 
 @app.exception_handler(RequestValidationError)
@@ -64,6 +68,12 @@ if EXAMPLE_COURSE_ROOT.is_dir():
         StaticFiles(directory=EXAMPLE_COURSE_ROOT, html=True),
         name="course-example",
     )
+PUBLISHED_ROOT.mkdir(parents=True, exist_ok=True)
+app.mount(
+    "/published",
+    StaticFiles(directory=PUBLISHED_ROOT, html=True),
+    name="published",
+)
 
 
 def run() -> None:

@@ -5,6 +5,8 @@ import json
 from threading import Lock
 from uuid import uuid4
 
+from app.catalog import CourseSummary, write_course
+from app.v0 import publishing
 from app.v0.agents import AGENT_DEFINITIONS, AgentExecutor
 from app.v0.artifact_tools import ArtifactTools
 from app.v0.provider import Provider
@@ -21,7 +23,7 @@ from app.v0.schemas import (
     GraphState,
     V0Run,
 )
-from app.v0.storage import FactStore
+from app.v0.storage import FactStore, command_hash
 
 V0_QUALITY_LIMITATIONS = (
     "未核验事实来源",
@@ -31,9 +33,20 @@ V0_QUALITY_LIMITATIONS = (
 
 
 class V0Runner:
-    def __init__(self, provider: Provider, store: FactStore | None = None):
+    def __init__(
+        self,
+        provider: Provider,
+        store: FactStore | None = None,
+        *,
+        published_root=None,
+        catalog_path=None,
+    ):
+        from app.catalog import CATALOG_PATH, PUBLISHED_ROOT
+
         self.provider = provider
         self.store = store
+        self.published_root = published_root or PUBLISHED_ROOT
+        self.catalog_path = catalog_path or CATALOG_PATH
         self._runs: dict[str, V0Run] = {}
         self._memory_artifacts: dict[tuple[str, int], ArtifactRecord] = {}
         self._lock = Lock()
@@ -372,6 +385,39 @@ class V0Runner:
             )
         )
         return self.get(run_id)
+
+    def publish(self, run_id: str, request_key: str | None = None) -> V0Run:
+        """Materialize a prepared Run into an explicit published course."""
+        if self.store is None:
+            raise ValueError("发布需要持久化事实库")
+        if request_key:
+            replay = self.store.publication_replay(run_id, request_key)
+            if replay is not None:
+                return replay
+        run = self.store.get_run(run_id)
+        if run.status != "ready_for_release":
+            raise ValueError("只有已准备发布的 Run 才能发布")
+        content = self.store.get_run_content(run_id)
+        slug = self._unique_slug(publishing.slugify(run.course_input.topic))
+        entry = publishing.materialize(run, content, slug, self.published_root)
+        write_course(CourseSummary.model_validate(entry), self.catalog_path)
+        return self.store.record_publication(
+            run,
+            slug=slug,
+            href=entry["href"],
+            entry=entry,
+            request_key=request_key or uuid4().hex,
+            request_hash=command_hash("PUBLISH", {}),
+        )
+
+    def _unique_slug(self, base: str) -> str:
+        slug, suffix = base, 1
+        while self.store.publication_slug_exists(slug) or (
+            self.published_root / slug
+        ).exists():
+            suffix += 1
+            slug = f"{base}-{suffix}"
+        return slug
 
     def _record_release_decision(
         self,

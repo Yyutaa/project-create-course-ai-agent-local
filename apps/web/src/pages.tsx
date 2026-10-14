@@ -11,6 +11,7 @@ import {
   canResumeRun,
   canStartRun,
   canDecideRelease,
+  canPublish,
   canReviewMission,
   canReviewQuality,
   courseCreationAction,
@@ -313,6 +314,20 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
       void queryClient.invalidateQueries({ queryKey: ["snapshot", decided.id] });
     },
   });
+  const publishMutation = useMutation({
+    mutationFn: async () => {
+      if (!runId) throw new Error("Run 不存在");
+      const key = pendingKey(sessionStorage, `publish:${runId}`, "publish");
+      return api.publishRun(runId, key);
+    },
+    onSuccess: (published) => {
+      clearPendingKey(sessionStorage, `publish:${published.id}`);
+      queryClient.setQueryData(["run", published.id], published);
+      void queryClient.invalidateQueries({ queryKey: ["execution", published.id] });
+      void queryClient.invalidateQueries({ queryKey: ["courses"] });
+      void queryClient.invalidateQueries({ queryKey: ["snapshot", published.id] });
+    },
+  });
   const controlMutation = useMutation({
     mutationFn: async (kind: "STOP" | "RESUME" | "REVISE") => {
       if (!runId) throw new Error("Run 不存在");
@@ -406,8 +421,8 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
       void queryClient.invalidateQueries({ queryKey: ["evidence", command.run_id] });
     },
   });
-  const busy = startMutation.isPending || releaseMutation.isPending || controlMutation.isPending || budgetMutation.isPending || missionReviewMutation.isPending || qualityReviewMutation.isPending;
-  const error = startMutation.error || releaseMutation.error || controlMutation.error || budgetMutation.error || missionReviewMutation.error || qualityReviewMutation.error || runQuery.error || contentQuery.error || executionQuery.error || evidenceQuery.error;
+  const busy = startMutation.isPending || releaseMutation.isPending || publishMutation.isPending || controlMutation.isPending || budgetMutation.isPending || missionReviewMutation.isPending || qualityReviewMutation.isPending;
+  const error = startMutation.error || releaseMutation.error || publishMutation.error || controlMutation.error || budgetMutation.error || missionReviewMutation.error || qualityReviewMutation.error || runQuery.error || contentQuery.error || executionQuery.error || evidenceQuery.error;
   const chapterDeviation = run?.stages.some(
     (stage) => stage.failure_reason === "blueprint_chapter_deviation",
   ) ?? false;
@@ -695,7 +710,22 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
               </div>
             </section>
           )}
-          {run.status === "ready_for_release" && <p className="notice">人工已选择准备发布；V0 尚未发布任何文件。</p>}
+          {canPublish(run) && (
+            <section className="release-panel" data-od-id="publish-panel">
+              <h2>发布课程</h2>
+              <p>课程已通过质量门禁。发布后会在「已发布」列表生成可访问的课程页面，并从「我的课程」移除。</p>
+              <div className="release-actions">
+                <button disabled={busy || publishMutation.isPending} onClick={() => publishMutation.mutate()}>
+                  {publishMutation.isPending ? "正在发布…" : "发布课程"}
+                </button>
+              </div>
+            </section>
+          )}
+          {run.status === "published" && run.publication && (
+            <p className="notice" data-od-id="published-notice">
+              课程已发布：<a className="text-link" href={run.publication.href}>{run.publication.href}</a>
+            </p>
+          )}
           {run.status === "stopped" && !tokenTerminated && <p className="notice">人工已停止本次运行。</p>}
         </>
       )}

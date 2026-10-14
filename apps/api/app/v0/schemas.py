@@ -21,7 +21,8 @@ StageStatus = Literal[
 ]
 AgentRole = Literal["mission", "blueprint", "writer", "reviewer", "repair"]
 RunStatus = Literal[
-    "running", "failed", "waiting_for_human", "ready_for_release", "stopped"
+    "running", "failed", "waiting_for_human", "ready_for_release", "stopped",
+    "published",
 ]
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 ContextTerm = Annotated[
@@ -255,6 +256,14 @@ class ReleaseDecision(BaseModel):
     reason: NonEmptyText
 
 
+class Publication(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slug: NonEmptyText
+    href: NonEmptyText
+    published_at: NonEmptyText
+
+
 class CourseRecord(BaseModel):
     id: NonEmptyText
     title: NonEmptyText
@@ -344,6 +353,7 @@ class V0Run(BaseModel):
     lesson: LessonDraft | None = None
     quality: QualitySummary | None = None
     release_decision: ReleaseDecision | None = None
+    publication: Publication | None = None
 
     @model_validator(mode="after")
     def validate_stages(self) -> "V0Run":
