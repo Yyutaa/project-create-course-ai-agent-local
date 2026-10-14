@@ -71,6 +71,43 @@ def test_publish_materializes_course_and_catalog(tmp_path):
     assert any(item["slug"] == slug for item in catalog["courses"])
 
 
+def test_publish_renders_styled_site_and_assets(tmp_path):
+    runner = make_runner(tmp_path)
+    run_id = prepare(runner)
+
+    published = runner.publish(run_id, "pub-1")
+    course_dir = tmp_path / "published" / published.publication.slug
+
+    index = (course_dir / "index.html").read_text(encoding="utf-8")
+    assert "course-hero" in index
+    assert "chapter-card" in index
+    assert 'href="./assets/course.css"' in index
+
+    lesson_html = sorted((course_dir / "lessons").glob("*.html"))
+    assert len(lesson_html) == 1
+    lesson = lesson_html[0].read_text(encoding="utf-8")
+    assert "chapter-nav" in lesson
+    assert 'class="lesson-content"' in lesson
+    assert "lesson-nav" in lesson
+
+    assets = course_dir / "assets"
+    for name in (
+        "course.css",
+        "theme.css",
+        "course-shell.css",
+        "course.js",
+        "theme-switcher.js",
+        "reading-progress.js",
+        "themes/guardnet.css",
+        "themes/evergreen.css",
+    ):
+        assert (assets / name).is_file(), name
+
+    course = json.loads((course_dir / "course.json").read_text(encoding="utf-8"))
+    assert course["lessons"][0]["href"].endswith(".html")
+    assert course["mark"]
+
+
 def test_published_run_leaves_the_draft_list(tmp_path):
     runner = make_runner(tmp_path)
     run_id = prepare(runner)
