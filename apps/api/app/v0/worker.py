@@ -117,6 +117,27 @@ class Worker:
             except PermissionError:
                 return
 
+    def _reconcile_after_artifact(self, run_id: str, epoch: int):
+        run = self.runner.get(run_id)
+        checkpoint = self.execution.last_checkpoint(run_id)
+        if (
+            run.status != "running"
+            and checkpoint
+            and checkpoint["position"] == "after_artifact"
+        ):
+            state = GraphState.model_validate_json(checkpoint["state_json"])
+            outcome = {
+                "failed": "failed", "stopped": "stopped",
+                "ready_for_release": "succeeded",
+            }.get(run.status, "waiting_for_human")
+            self.execution.finish_node(
+                checkpoint["node_execution_id"],
+                state.model_copy(update={"last_outcome": outcome}),
+                self.owner, epoch, failed=run.status == "failed",
+            )
+            checkpoint = self.execution.last_checkpoint(run_id)
+        return run, checkpoint
+
     def _apply(self, command: Command, epoch: int) -> None:
         run_id = command.run_id
         self.budgeted_provider.bind(self.owner, epoch, command.id)
@@ -156,7 +177,18 @@ class Worker:
                 raise RuntimeError("Graph 节点业务失败；不自动重试")
             return
         if command.kind == "QUALITY_REVIEW":
-            self.execution.apply_quality_review(command, self.owner, epoch)
+            decision = self.execution.apply_quality_review(command, self.owner, epoch)
+            checkpoint = self.execution.last_checkpoint(run_id)
+            if (
+                decision.get("replayed")
+                and checkpoint is not None
+                and checkpoint["id"] != command.payload["expected_checkpoint_id"]
+            ):
+                run, _ = self._reconcile_after_artifact(run_id, epoch)
+                if run.status == "failed":
+                    raise RuntimeError("Graph 节点业务失败；不自动重试")
+                if run.status != "running":
+                    return
             state = self._resume_state(run_id)
             if state is None:
                 return
@@ -184,18 +216,7 @@ class Worker:
                 raise ValueError("RESUME 仅允许从停止或等待人工状态继续")
             self.execution.prepare_resume(run_id, self.owner, epoch)
         elif run.status != "running":
-            checkpoint = self.execution.last_checkpoint(run_id)
-            if checkpoint and checkpoint["position"] == "after_artifact":
-                state = GraphState.model_validate_json(checkpoint["state_json"])
-                outcome = {
-                    "failed": "failed", "stopped": "stopped",
-                    "ready_for_release": "succeeded",
-                }.get(run.status, "waiting_for_human")
-                self.execution.finish_node(
-                    checkpoint["node_execution_id"],
-                    state.model_copy(update={"last_outcome": outcome}),
-                    self.owner, epoch, failed=run.status == "failed",
-                )
+            run, checkpoint = self._reconcile_after_artifact(run_id, epoch)
             if run.status in ("waiting_for_human", "stopped", "ready_for_release"):
                 if checkpoint and checkpoint["position"] in ("after_node", "after_artifact"):
                     return

@@ -529,6 +529,252 @@ def test_quality_review_retry_rechecks_the_same_lesson(stores):
     assert count == 1
 
 
+class VerificationWithoutFindingProvider(FakeProvider):
+    def __init__(self):
+        super().__init__()
+        self.rubric_calls = 0
+
+    def invoke(self, request):
+        if request.role == "reviewer" and request.goal.startswith("rubric"):
+            self.rubric_calls += 1
+            return AgentResponse(role="reviewer", payload=QualitySummary(
+                status="manual_review",
+                checks=["目标与练习仍需人工确认"],
+                findings=([{
+                    "code": "objective_alignment",
+                    "category": "teaching",
+                    "severity": "minor",
+                    "evidence": "坏说明",
+                    "recommendation": "补充目标与练习的对应关系",
+                }] if self.rubric_calls == 1 else []),
+                language_risk="尚未检查表达",
+                limitations=["事实未核验"],
+            ).model_dump())
+        response = super().invoke(request)
+        if request.role == "writer":
+            response.payload["markdown"] = "# 标题\n\n坏说明\n\n练习：完成示例。"
+        elif request.role == "repair":
+            response.payload["markdown"] = "修订后说明"
+        return response
+
+
+def test_quality_review_accepts_candidate_after_verification_waits(stores):
+    facts, commands, run_id = stores
+    commands.accept(run_id, "START", {}, "start-1")
+    worker = Worker(
+        facts.path, provider=VerificationWithoutFindingProvider(), owner="worker-a"
+    )
+    worker.run_once()
+
+    checkpoint = commands.last_checkpoint(run_id)
+    state = GraphState.model_validate_json(checkpoint["state_json"])
+    review = commands.read_model(run_id).quality_review
+    assert state.current_node == "verification"
+    assert state.last_outcome == "waiting_for_human"
+    assert review is not None
+    assert review.lesson_ref == state.artifact_refs["candidate"]
+
+    commands.accept(run_id, "QUALITY_REVIEW", {
+        "action": "accept",
+        "quality_ref": review.quality_ref.model_dump(mode="json"),
+        "lesson_ref": review.lesson_ref.model_dump(mode="json"),
+        "expected_checkpoint_id": review.checkpoint_id,
+        "reason": "人工确认接受当前 Candidate 的质量风险",
+    }, "accept-verification-candidate")
+    worker.run_once()
+
+    result = facts.get_run(run_id)
+    assert commands.list_commands(run_id)[-1].status == "APPLIED"
+    assert "修订后说明" in result.lesson.markdown
+    assert result.stages[5].status == "succeeded"
+    assert result.stages[6].status == "waiting_for_human"
+    with facts.connect() as connection:
+        event_types = {
+            row["type"] for row in connection.execute(
+                "SELECT type FROM events WHERE run_id=?", (run_id,)
+            )
+        }
+        candidate_command_key = connection.execute(
+            "SELECT request_key FROM events WHERE run_id=? "
+            "AND type='candidate.human_accepted'", (run_id,)
+        ).fetchone()[0]
+        connection.execute("DELETE FROM snapshots WHERE run_id=?", (run_id,))
+    assert "quality.risk_accepted" in event_types
+    assert "candidate.human_accepted" in event_types
+    assert candidate_command_key.endswith(":candidate")
+    assert "修订后说明" in facts.get_run(run_id).lesson.markdown
+    assert "修订后说明" in facts.get_run_content(run_id).chapters[0].markdown
+
+
+def test_quality_review_retry_rechecks_verification_candidate(stores):
+    facts, commands, run_id = stores
+    provider = VerificationWithoutFindingProvider()
+    commands.accept(run_id, "START", {}, "start-1")
+    worker = Worker(facts.path, provider=provider, owner="worker-a")
+    worker.run_once()
+    original = facts.get_run(run_id).lesson
+    review = commands.read_model(run_id).quality_review
+
+    commands.accept(run_id, "QUALITY_REVIEW", {
+        "action": "retry",
+        "quality_ref": review.quality_ref.model_dump(mode="json"),
+        "lesson_ref": review.lesson_ref.model_dump(mode="json"),
+        "expected_checkpoint_id": review.checkpoint_id,
+    }, "retry-verification-candidate")
+    worker.run_once()
+
+    result = facts.get_run(run_id)
+    next_review = commands.read_model(run_id).quality_review
+    assert result.status == "waiting_for_human"
+    assert result.lesson == original
+    assert next_review.lesson_ref == review.lesson_ref
+    assert provider.rubric_calls == 3
+    with facts.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM events WHERE run_id=? "
+            "AND type='candidate.human_accepted'", (run_id,)
+        ).fetchone()[0] == 0
+
+
+def test_verification_acceptance_rebuilds_running_snapshot_before_resume(stores):
+    facts, commands, run_id = stores
+    commands.accept(run_id, "START", {}, "start-1")
+    Worker(
+        facts.path, provider=VerificationWithoutFindingProvider(), owner="worker-a"
+    ).run_once()
+    review = commands.read_model(run_id).quality_review
+    command = commands.accept(run_id, "QUALITY_REVIEW", {
+        "action": "accept",
+        "quality_ref": review.quality_ref.model_dump(mode="json"),
+        "lesson_ref": review.lesson_ref.model_dump(mode="json"),
+        "expected_checkpoint_id": review.checkpoint_id,
+        "reason": "人工确认接受当前 Candidate 的质量风险",
+    }, "accept-before-worker-resume")
+    commands.expire_for_test(run_id)
+    claimed = commands.claim("worker-b")
+    epoch = commands.acquire(run_id, "worker-b")
+    assert claimed.id == command.id
+    commands.apply_quality_review(claimed, "worker-b", epoch)
+
+    decision_checkpoint = commands.last_checkpoint(run_id)
+    decision_state = GraphState.model_validate_json(decision_checkpoint["state_json"])
+    assert decision_checkpoint["id"] != review.checkpoint_id
+    assert decision_checkpoint["node_execution_id"] is None
+    assert decision_state.current_node == "verification"
+    assert decision_state.last_outcome == "succeeded"
+    assert decision_state.exit_reason == "candidate_human_accepted"
+    assert decision_state.artifact_refs[
+        f"lesson:{facts.get_run(run_id).lesson.lesson_id}"
+    ] == review.lesson_ref
+
+    with facts.connect() as connection:
+        connection.execute("DELETE FROM snapshots WHERE run_id=?", (run_id,))
+    rebuilt = facts.get_run(run_id)
+    assert rebuilt.status == "running"
+    assert rebuilt.stages[5].status == "pending"
+    assert "修订后说明" in rebuilt.lesson.markdown
+
+    commands.finish_command(command.id, "worker-b", epoch, "APPLIED")
+    commands.accept(run_id, "STOP", {}, "stop-after-quality-review")
+    commands.expire_for_test(run_id)
+    recovery_worker = Worker(
+        facts.path, provider=VerificationWithoutFindingProvider(), owner="worker-c"
+    )
+    assert recovery_worker.run_once()
+    assert facts.get_run(run_id).status == "stopped"
+    commands.accept(run_id, "RESUME", {}, "resume-human-accepted-candidate")
+    assert recovery_worker.run_once()
+    resumed = facts.get_run(run_id)
+    assert resumed.stages[5].status == "succeeded"
+    assert resumed.stages[6].status == "waiting_for_human"
+
+
+def test_quality_review_replay_does_not_reapply_old_action_to_release(stores):
+    facts, commands, run_id = stores
+    commands.accept(run_id, "START", {}, "start-1")
+    worker = Worker(
+        facts.path, provider=VerificationWithoutFindingProvider(), owner="worker-a"
+    )
+    worker.run_once()
+    review = commands.read_model(run_id).quality_review
+    command = commands.accept(run_id, "QUALITY_REVIEW", {
+        "action": "accept",
+        "quality_ref": review.quality_ref.model_dump(mode="json"),
+        "lesson_ref": review.lesson_ref.model_dump(mode="json"),
+        "expected_checkpoint_id": review.checkpoint_id,
+        "reason": "人工确认接受当前 Candidate 的质量风险",
+    }, "accept-before-finish-crash")
+    worker.run_once()
+    with facts.connect() as connection:
+        before_nodes = connection.execute(
+            "SELECT COUNT(*) FROM node_executions WHERE run_id=?", (run_id,)
+        ).fetchone()[0]
+    assert facts.get_run(run_id).stages[6].status == "waiting_for_human"
+
+    with facts.connect() as connection:
+        connection.execute(
+            "UPDATE commands SET status='CLAIMED', claimed_by='dead-worker' WHERE id=?",
+            (command.id,),
+        )
+    commands.expire_for_test(run_id)
+    assert Worker(
+        facts.path, provider=VerificationWithoutFindingProvider(), owner="worker-b"
+    ).run_once()
+
+    result = facts.get_run(run_id)
+    assert result.status == "waiting_for_human"
+    assert result.stages[6].status == "waiting_for_human"
+    with facts.connect() as connection:
+        after_nodes = connection.execute(
+            "SELECT COUNT(*) FROM node_executions WHERE run_id=?", (run_id,)
+        ).fetchone()[0]
+    assert after_nodes == before_nodes
+
+
+def test_quality_review_replay_reconciles_release_after_artifact(stores):
+    facts, commands, run_id = stores
+    commands.accept(run_id, "START", {}, "start-1")
+    first = Worker(
+        facts.path, provider=VerificationWithoutFindingProvider(), owner="worker-a"
+    )
+    first.run_once()
+    review = commands.read_model(run_id).quality_review
+    commands.accept(run_id, "QUALITY_REVIEW", {
+        "action": "accept",
+        "quality_ref": review.quality_ref.model_dump(mode="json"),
+        "lesson_ref": review.lesson_ref.model_dump(mode="json"),
+        "expected_checkpoint_id": review.checkpoint_id,
+        "reason": "人工确认接受当前 Candidate 的质量风险",
+    }, "accept-before-release-finish-crash")
+    command = commands.claim("worker-a")
+    epoch = commands.acquire(run_id, "worker-a")
+    original = first.runner._node_finished
+
+    def crash_at_release(state, result):
+        if result["current_node"] == "release":
+            raise SystemExit("simulated process death")
+        original(state, result)
+
+    first.runner._node_finished = crash_at_release
+    with pytest.raises(SystemExit, match="process death"):
+        first._apply(command, epoch)
+
+    assert facts.get_run(run_id).status == "waiting_for_human"
+    assert commands.last_checkpoint(run_id)["position"] == "after_artifact"
+    assert commands.current_node(run_id)["status"] == "STARTED"
+
+    commands.expire_for_test(run_id)
+    assert Worker(
+        facts.path, provider=VerificationWithoutFindingProvider(), owner="worker-b"
+    ).run_once()
+
+    assert commands.list_commands(run_id)[-1].status == "APPLIED"
+    assert facts.get_run(run_id).stages[6].status == "waiting_for_human"
+    assert commands.current_node(run_id)["status"] == "COMMITTED"
+    assert commands.last_checkpoint(run_id)["position"] == "after_node"
+    assert commands.list_commands(run_id)[-1].status == "APPLIED"
+
+
 def test_crash_after_first_lesson_reuses_it_and_completes_two_batches(stores):
     facts, commands, run_id = stores
 

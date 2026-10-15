@@ -496,7 +496,9 @@ class FactStore:
                 self._apply_event_artifact(connection, run, event)
             elif kind == "candidate.created" and event["artifact_id"]:
                 self._apply_event_artifact(connection, run, event, activate=False)
-            elif kind == "candidate.accepted" and event["artifact_id"]:
+            elif kind in (
+                "candidate.accepted", "candidate.human_accepted"
+            ) and event["artifact_id"]:
                 self._apply_event_artifact(connection, run, event, append=False)
             elif kind == "stage.waiting" and stage:
                 run.status = "waiting_for_human"
@@ -555,6 +557,10 @@ class FactStore:
                     "succeeded" if kind == "mission.approved" else "pending"
                 )
                 run.stages[1].failure_reason = None
+            elif kind in ("quality.risk_accepted", "quality.retry_requested"):
+                run.status = "running"
+                run.stages[5].status = "pending"
+                run.stages[5].failure_reason = None
             run.revision = event["id"]
         return run
 
@@ -927,7 +933,8 @@ class FactStore:
                 "JOIN artifacts ON artifacts.artifact_id=events.artifact_id "
                 "AND artifacts.version=events.artifact_version "
                 "WHERE events.run_id=? AND artifacts.kind='lesson' "
-                "AND events.type IN ('artifact.created', 'candidate.accepted') "
+                "AND events.type IN ('artifact.created', 'candidate.accepted', "
+                "'candidate.human_accepted') "
                 "ORDER BY events.id",
                 (run_id,),
             ).fetchall()

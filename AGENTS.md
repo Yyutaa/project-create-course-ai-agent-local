@@ -158,6 +158,9 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
   不传整章或历史。只允许精确单行替换，片段不匹配或越界时停止。Repair 产生新版
   Lesson Candidate；`candidate.created` 不改变有效 Lesson，独立 Verification 全部通过后
   才记录 `candidate.accepted` 并切换投影，失败记录 `candidate.rejected`，旧版始终可读。
+  若 Verification 已明确失败，只有绑定精确 Candidate、Quality Artifact 与 checkpoint
+  的 `QUALITY_REVIEW accept` 才能以 `candidate.human_accepted` 切换投影；该事件是人工
+  风险覆盖，不得表述为独立验证通过。
 - Verification 由确定性检查器和 Reviewer/Humanizer 重新读取 Candidate，不能采信
   Repair 的自述。每个 Candidate 从 deterministic 起重跑三层；验证记录和 Finding、
   RepairTask 留在不可覆盖的 Quality Artifact/Event 链中。
@@ -188,11 +191,13 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
   `STARTED` 必须被阻止。不得用强杀代替协作停止。RESUME 仅从合法停止/人工等待
   checkpoint 继续，不代表业务失败阶段自动重试。REVISE 持久保存有长度上限的人工
   输入并校验期望 checkpoint；release 决定仍由独立人工接口提交。
-- `QUALITY_REVIEW` 仅作用于 `quality=waiting_for_human` 且当前内部节点为 `quality`
-  的精确 checkpoint。`retry` 重新检查同一 Lesson Artifact；`accept` 必须携带人工说明，
-  绑定当前 Lesson 与 Quality Artifact 的精确版本和 hash，记录
-  `quality.risk_accepted` 后生成新的 Quality Artifact，并继续下一章或进入人工 release。
-  它不等同于模型 Gate 通过，也不得自动发布。通用 `REVISE` 文本不能替代该决定。
+- `QUALITY_REVIEW` 仅作用于 `quality=waiting_for_human` 且当前内部节点为 `quality` 或
+  `verification` 的精确 checkpoint。`retry` 重新检查同一 Lesson 或 Candidate Artifact；
+  `accept` 必须携带人工说明，绑定当前 Lesson/Candidate 与 Quality Artifact 的精确版本
+  和 hash。`quality` 等待态记录 `quality.risk_accepted`；`verification` 等待态还须记录
+  `candidate.human_accepted`，明确区分于独立验证通过的 `candidate.accepted`。决定提交后
+  生成新的 Quality Artifact，并继续下一章或进入人工 release。它不等同于模型 Gate
+  通过，也不得自动发布。通用 `REVISE` 文本不能替代该决定。
 - 读取模型组合 Command、当前 NodeExecution、最后 checkpoint、停止请求和等待人工原因；
   Snapshot 与前端缓存都不持有执行权。正常模型调用可能在崩溃后重复，保证的是
   已提交事实的幂等与旧租约围栏，不声称 Provider 调用 exactly-once。

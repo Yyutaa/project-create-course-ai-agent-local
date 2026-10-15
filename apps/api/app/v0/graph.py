@@ -95,6 +95,7 @@ def route_after_verification(state: GraphState) -> str:
     if state.last_outcome == "succeeded":
         return {
             "candidate_accepted": "quality",
+            "candidate_human_accepted": "quality",
             "all_lessons_ready": "release",
             "repair_needed": "repair",
         }.get(state.exit_reason or "", "route_error")

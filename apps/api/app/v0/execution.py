@@ -13,6 +13,7 @@ from app.v0.schemas import (
     BLUEPRINT_CHAPTER_DEVIATION_REASON,
     ArtifactRef,
     GraphState,
+    LessonDraft,
 )
 from app.v0.sensitive import safe_error, safe_waiting_reason
 from app.v0.budget import BudgetStore, BudgetSummary, TokenLimitReached
@@ -413,14 +414,15 @@ class ExecutionStore:
                 (command.run_id, command.id),
             ).fetchone()
             if replay:
-                return dict(replay)
+                return {**dict(replay), "replayed": True}
             run = self.facts._get_run(connection, command.run_id)
             if run.status != "waiting_for_human" or (
                 run.stages[5].status != "waiting_for_human"
             ):
                 raise ValueError("Run 未等待 Quality 人工处理")
             checkpoint = connection.execute(
-                "SELECT id, position, state_json FROM checkpoints WHERE run_id=? "
+                "SELECT id, node_execution_id, position, state_json FROM checkpoints "
+                "WHERE run_id=? "
                 "ORDER BY rowid DESC LIMIT 1",
                 (command.run_id,),
             ).fetchone()
@@ -430,15 +432,16 @@ class ExecutionStore:
             ):
                 raise ValueError("Quality 审批 checkpoint 已过期")
             state = GraphState.model_validate_json(checkpoint["state_json"])
-            if state.current_node != "quality":
+            if state.current_node not in ("quality", "verification"):
                 raise ValueError("当前等待节点不支持 Quality 审批")
             quality = connection.execute(
                 "SELECT artifact_id, version, content_hash FROM artifacts "
-                "WHERE run_id=? AND kind='quality' ORDER BY rowid DESC LIMIT 1",
-                (command.run_id,),
+                "WHERE run_id=? AND kind='quality' AND artifact_id=? AND version=?",
+                (command.run_id, quality_ref.artifact_id, quality_ref.version),
             ).fetchone()
             if (
                 quality_ref.run_id != command.run_id or quality_ref.kind != "quality"
+                or state.artifact_refs.get("quality") != quality_ref
                 or quality is None or quality["artifact_id"] != quality_ref.artifact_id
                 or quality["version"] != quality_ref.version
                 or quality["content_hash"] != quality_ref.content_hash
@@ -449,9 +452,36 @@ class ExecutionStore:
             if run.blueprint is None or state.quality_cursor >= len(run.blueprint.lessons):
                 raise ValueError("Quality 审批缺少当前章节")
             lesson_id = run.blueprint.lessons[state.quality_cursor].lesson_id
-            current_lesson = state.artifact_refs.get(f"lesson:{lesson_id}")
+            current_lesson = state.artifact_refs.get(
+                "candidate" if state.current_node == "verification"
+                else f"lesson:{lesson_id}"
+            )
             if current_lesson != lesson_ref:
                 raise ValueError("Quality 审批 Lesson 引用已过期")
+            if action == "accept" and state.current_node == "verification":
+                candidate = connection.execute(
+                    "SELECT content_json, producer_role FROM artifacts WHERE run_id=? "
+                    "AND artifact_id=? AND version=? AND kind='lesson' "
+                    "AND content_hash=?",
+                    (
+                        command.run_id, lesson_ref.artifact_id,
+                        lesson_ref.version, lesson_ref.content_hash,
+                    ),
+                ).fetchone()
+                if candidate is None or candidate["producer_role"] != "repair":
+                    raise ValueError("Quality 审批 Candidate 引用无效")
+                run.lesson = LessonDraft.model_validate(json.loads(candidate["content_json"]))
+                connection.execute(
+                    "INSERT INTO events(run_id, stage, type, status, artifact_id, "
+                    "artifact_version, request_key, request_hash, created_at) "
+                    "VALUES (?, 'quality', 'candidate.human_accepted', 'running', "
+                    "?, ?, ?, ?, ?)",
+                    (
+                        command.run_id, lesson_ref.artifact_id, lesson_ref.version,
+                        f"{command.id}:candidate",
+                        command_hash(command.kind, command.payload), now,
+                    ),
+                )
             event_type = (
                 "quality.risk_accepted"
                 if action == "accept" else "quality.retry_requested"
@@ -471,6 +501,19 @@ class ExecutionStore:
                 ),
             ).lastrowid
             run.revision = event_id
+            if action == "accept" and state.current_node == "verification":
+                refs = dict(state.artifact_refs)
+                refs[f"lesson:{lesson_id}"] = lesson_ref
+                decision_state = state.model_copy(update={
+                    "artifact_refs": refs,
+                    "active_finding_id": None,
+                    "last_outcome": "succeeded",
+                    "exit_reason": "candidate_human_accepted",
+                })
+                self._checkpoint(
+                    connection, command.run_id, None,
+                    "after_node", decision_state, event_id,
+                )
             connection.execute(
                 "UPDATE runs SET status='running', updated_at=? WHERE id=?",
                 (now, command.run_id),
@@ -480,7 +523,7 @@ class ExecutionStore:
                 "WHERE run_id=?",
                 (event_id, run.model_dump_json(), now, command.run_id),
             )
-            return {"id": event_id, "type": event_type}
+            return {"id": event_id, "type": event_type, "replayed": False}
 
     @staticmethod
     def _checkpoint(connection, run_id: str, execution_id: str | None,
@@ -745,28 +788,22 @@ class ExecutionStore:
             and checkpoint["position"] == "after_node"
         ):
             state = GraphState.model_validate_json(checkpoint["state_json"])
-            quality_artifacts = [
-                item for item in self.facts.list_artifacts(run_id)
-                if item.kind == "quality"
-            ]
+            quality_ref = state.artifact_refs.get("quality")
             if (
-                state.current_node == "quality" and quality_artifacts
+                state.current_node in ("quality", "verification")
+                and quality_ref is not None
                 and run.blueprint is not None
                 and state.quality_cursor < len(run.blueprint.lessons)
             ):
                 lesson_id = run.blueprint.lessons[state.quality_cursor].lesson_id
-                lesson_ref = state.artifact_refs.get(f"lesson:{lesson_id}")
-                latest = quality_artifacts[-1]
+                lesson_ref = state.artifact_refs.get(
+                    "candidate" if state.current_node == "verification"
+                    else f"lesson:{lesson_id}"
+                )
                 if lesson_ref is not None:
                     quality_review = QualityReviewView(
                         status="pending",
-                        quality_ref=ArtifactRef(
-                            run_id=run_id,
-                            artifact_id=latest.artifact_id,
-                            version=latest.version,
-                            kind="quality",
-                            content_hash=latest.content_hash,
-                        ),
+                        quality_ref=quality_ref,
                         lesson_ref=lesson_ref,
                         checkpoint_id=checkpoint["id"],
                     )
