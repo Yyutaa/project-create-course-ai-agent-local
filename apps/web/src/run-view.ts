@@ -32,13 +32,14 @@ export function courseCreationAction(
 }
 
 export function generationConstraintLabels(
-  input: Pick<CourseInput, "expected_chapters" | "min_effective_chars" | "token_limit">,
+  input: Pick<CourseInput, "source_policy" | "expected_chapters" | "min_effective_chars" | "token_limit">,
 ): string[] {
   return [
     `期望章节：${input.expected_chapters.toLocaleString("en-US")}（允许 ±1 章偏差）`,
     `单章下限：${input.min_effective_chars.toLocaleString("en-US")} 有效字符`,
     `Token 阈值：${input.token_limit === null
       ? "不限制" : input.token_limit.toLocaleString("en-US")}`,
+    `来源政策：${input.source_policy}`,
   ];
 }
 

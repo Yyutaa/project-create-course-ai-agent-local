@@ -25,6 +25,10 @@ RunStatus = Literal[
     "published",
 ]
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+SourcePolicy = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=300)
+]
+DEFAULT_SOURCE_POLICY = "允许使用用户资料与公开官方资料"
 ContextTerm = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)
 ]
@@ -81,6 +85,7 @@ class CourseInput(BaseModel):
     audience: NonEmptyText
     goal: NonEmptyText
     language: Literal["zh"]
+    source_policy: SourcePolicy = DEFAULT_SOURCE_POLICY
     expected_chapters: int = Field(default=12, ge=1, le=100)
     min_effective_chars: int = Field(default=12_000, gt=0)
     token_limit: int | None = Field(default=None, gt=0)

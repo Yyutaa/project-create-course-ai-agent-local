@@ -34,6 +34,7 @@ export type CourseInput = {
   audience: string;
   goal: string;
   language: "zh";
+  source_policy: string;
   expected_chapters: number;
   min_effective_chars: number;
   token_limit: number | null;

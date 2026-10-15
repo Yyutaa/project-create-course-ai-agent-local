@@ -334,6 +334,11 @@ class WorkflowNodes:
                 if run.constraints_version == 1
                 else None
             ),
+            source_policy=(
+                run.course_input.source_policy
+                if run.constraints_version == 1
+                else None
+            ),
         )
         candidate = self.runner.executor.invoke(
             "blueprint", state.run_id, inputs=pack.inputs
@@ -487,6 +492,11 @@ class WorkflowNodes:
                 previous_lesson_ref=previous_ref,
                 min_effective_chars=(
                     run.course_input.min_effective_chars
+                    if run.constraints_version == 1
+                    else None
+                ),
+                source_policy=(
+                    run.course_input.source_policy
                     if run.constraints_version == 1
                     else None
                 ),

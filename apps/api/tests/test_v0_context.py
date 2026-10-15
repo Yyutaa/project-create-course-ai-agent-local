@@ -286,3 +286,53 @@ def test_writer_trimming_keeps_all_ids_and_latest_continuity_constraints():
     assert ledger[0]["summary"] == ""
     assert ledger[0]["terminology"] == []
     assert ledger[-1]["terminology"]
+
+
+def test_source_policy_flows_into_mission_blueprint_and_writer_packs():
+    builder, records = fixture_builder()
+    course_input = CourseInput(
+        topic="Python",
+        audience="初学者",
+        goal="完成练习",
+        language="zh",
+        source_policy="仅公开官方资料",
+    )
+
+    mission = builder.for_mission(course_input)
+    assert mission.inputs[0].content["source_policy"] == "仅公开官方资料"
+
+    blueprint = builder.for_blueprint(
+        "run-1",
+        reference(records["mission"]),
+        expected_chapters=12,
+        source_policy="仅公开官方资料",
+    )
+    assert blueprint.inputs[0].content["source_policy"] == "仅公开官方资料"
+
+    writer = builder.for_writer(
+        "run-1",
+        reference(records["mission"]),
+        reference(records["blueprint"]),
+        reference(records["batch_plan"]),
+        lesson_index=0,
+        min_effective_chars=12_000,
+        source_policy="仅公开官方资料",
+    )
+    assert writer.inputs[0].content["source_policy"] == "仅公开官方资料"
+
+
+def test_legacy_mission_pack_omits_source_policy():
+    builder, _ = fixture_builder()
+    course_input = CourseInput(
+        topic="Python",
+        audience="初学者",
+        goal="完成练习",
+        language="zh",
+    )
+
+    pack = builder.for_mission(
+        course_input,
+        include_generation_constraints=False,
+    )
+
+    assert "source_policy" not in pack.inputs[0].content

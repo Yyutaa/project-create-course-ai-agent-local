@@ -450,11 +450,14 @@ a.course-card:hover {
   font-weight: 800;
 }
 
-.page-intro,
 .workflow-page,
-.placeholder-page,
-.run-page {
+.placeholder-page {
   max-width: 1040px;
+}
+
+.page-intro,
+.run-page {
+  max-width: none;
 }
 
 .page-intro {
@@ -514,50 +517,46 @@ a.course-card:hover {
   overflow: hidden;
 }
 
-.course-form>label,
-.course-form>.form-grid,
-.course-form>fieldset {
-  margin-right: 28px;
-  margin-left: 28px;
-}
-
-.form-section-heading {
+.form-section {
   display: grid;
-  grid-template-columns: 40px 1fr;
-  gap: 16px;
-  padding: 25px 28px 20px;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 44px;
+  align-items: start;
+  padding: 30px 28px;
   border-bottom: 1px solid #e7eae6;
 }
 
-.course-form>.form-section-heading:not(:first-child) {
-  border-top: 1px solid #e7eae6;
-}
-
-.form-section-heading>span {
-  align-self: start;
-  margin-top: 6px;
+.form-section-copy>span {
   color: #89938b;
   font: 700 12px ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-.form-section-heading h2 {
-  margin: 0 0 4px;
+.form-section-copy h2 {
+  margin: 10px 0 6px;
 }
 
-.form-section-heading p {
+.form-section-copy p {
   margin: 0;
+  color: var(--muted);
   font-size: 13px;
+  line-height: 1.6;
+}
+
+.form-section-fields {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
 }
 
 .form-grid,
 .constraint-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
 }
 
 .form-grid {
-  margin-top: 24px;
+  margin: 0;
 }
 
 .constraint-grid {
@@ -623,8 +622,7 @@ a.course-card:hover {
 }
 
 .generation-constraints {
-  margin-top: 24px;
-  margin-bottom: 24px;
+  margin: 0;
   padding: 0;
   border: 0;
   background: #fff;
@@ -633,6 +631,77 @@ a.course-card:hover {
 .generation-constraints small {
   color: #7a857d;
   font-weight: 400;
+}
+
+.source-policy-field>span {
+  display: block;
+  margin-bottom: 10px;
+  color: #354039;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.source-policy-field>small {
+  display: block;
+  margin-top: 10px;
+  color: #7a857d;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.generation-constraints .source-policy-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.generation-constraints .source-policy {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: 88px;
+  margin: 0;
+  padding: 13px;
+  border: 2px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 400;
+  transition: border-color .15s ease, background .15s ease;
+}
+
+.generation-constraints .source-policy:hover {
+  border-color: #aeb8b0;
+}
+
+.generation-constraints .source-policy.selected {
+  border-color: #85bd35;
+  background: #f6fbf0;
+}
+
+.generation-constraints .source-policy input {
+  width: auto;
+  margin-top: 3px;
+  accent-color: var(--lime-dark);
+}
+
+.generation-constraints .source-policy>span {
+  display: grid;
+  gap: 5px;
+}
+
+.generation-constraints .source-policy strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.generation-constraints .source-policy small {
+  color: #7a857d;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.5;
 }
 
 .visually-hidden {
@@ -924,18 +993,18 @@ button.secondary {
 
   .course-grid,
   .form-grid,
-  .constraint-grid {
+  .constraint-grid,
+  .generation-constraints .source-policy-grid {
     grid-template-columns: 1fr;
   }
 
-  .course-form>label,
-  .course-form>.form-grid,
-  .course-form>fieldset {
-    margin-right: 18px;
-    margin-left: 18px;
+  .form-section {
+    grid-template-columns: 1fr;
+    gap: 16px;
+    padding-right: 18px;
+    padding-left: 18px;
   }
 
-  .form-section-heading,
   .form-submit {
     padding-right: 18px;
     padding-left: 18px;

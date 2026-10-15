@@ -70,25 +70,32 @@ class FactStore:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version >= 9:
+            if version >= 10:
+                return
+            if version == 9:
+                self._migrate_v10(connection)
                 return
             if version == 8:
                 self._migrate_v9(connection)
+                self._migrate_v10(connection)
                 return
             if version == 7:
                 self._migrate_v8(connection)
                 self._migrate_v9(connection)
+                self._migrate_v10(connection)
                 return
             if version == 6:
                 self._migrate_v7(connection)
                 self._migrate_v8(connection)
                 self._migrate_v9(connection)
+                self._migrate_v10(connection)
                 return
             if version == 5:
                 self._migrate_v6(connection)
                 self._migrate_v7(connection)
                 self._migrate_v8(connection)
                 self._migrate_v9(connection)
+                self._migrate_v10(connection)
                 return
             if version == 4:
                 self._migrate_v5(connection)
@@ -96,6 +103,7 @@ class FactStore:
                 self._migrate_v7(connection)
                 self._migrate_v8(connection)
                 self._migrate_v9(connection)
+                self._migrate_v10(connection)
                 return
             if version == 3:
                 self._migrate_v4(connection)
@@ -104,6 +112,7 @@ class FactStore:
                 self._migrate_v7(connection)
                 self._migrate_v8(connection)
                 self._migrate_v9(connection)
+                self._migrate_v10(connection)
                 return
             if version == 0:
                 connection.execute(
@@ -198,6 +207,7 @@ class FactStore:
             self._migrate_v7(connection)
             self._migrate_v8(connection)
             self._migrate_v9(connection)
+            self._migrate_v10(connection)
 
     @staticmethod
     def _migrate_v4(connection: sqlite3.Connection) -> None:
@@ -304,6 +314,21 @@ class FactStore:
         )
         connection.execute("PRAGMA user_version=9")
 
+    @staticmethod
+    def _migrate_v10(connection: sqlite3.Connection) -> None:
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='intakes'"
+        ).fetchone():
+            columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(intakes)")
+            }
+            if "source_policy" not in columns:
+                connection.execute(
+                    "ALTER TABLE intakes ADD COLUMN source_policy TEXT NOT NULL "
+                    "DEFAULT '允许使用用户资料与公开官方资料'"
+                )
+        connection.execute("PRAGMA user_version=10")
+
     def mission_review_required(self, run_id: str) -> bool:
         with self.connect() as connection:
             row = connection.execute(
@@ -349,14 +374,15 @@ class FactStore:
                 )
                 connection.execute(
                     "INSERT INTO intakes(run_id, topic, audience, goal, language, "
-                    "expected_chapters, min_effective_chars, token_limit) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "source_policy, expected_chapters, min_effective_chars, token_limit) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         run_id,
                         course_input.topic,
                         course_input.audience,
                         course_input.goal,
                         course_input.language,
+                        course_input.source_policy,
                         course_input.expected_chapters,
                         course_input.min_effective_chars,
                         course_input.token_limit,
@@ -420,7 +446,7 @@ class FactStore:
     def _rebuild(self, connection: sqlite3.Connection, run_id: str) -> V0Run:
         row = connection.execute(
             "SELECT runs.course_id, runs.constraints_version, intakes.topic, "
-            "intakes.audience, intakes.goal, intakes.language, "
+            "intakes.audience, intakes.goal, intakes.language, intakes.source_policy, "
             "intakes.expected_chapters, intakes.min_effective_chars, "
             "intakes.token_limit FROM runs JOIN intakes ON intakes.run_id=runs.id "
             "WHERE runs.id=?",
@@ -436,6 +462,7 @@ class FactStore:
                     "audience",
                     "goal",
                     "language",
+                    "source_policy",
                     "expected_chapters",
                     "min_effective_chars",
                     "token_limit",

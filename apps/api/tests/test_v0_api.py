@@ -169,6 +169,7 @@ def test_create_response_preserves_constraints_but_hides_intake(client):
         "audience": "已隐藏",
         "goal": "已隐藏",
         "language": "zh",
+        "source_policy": "允许使用用户资料与公开官方资料",
         "expected_chapters": 8,
         "min_effective_chars": 9000,
         "token_limit": 12345,

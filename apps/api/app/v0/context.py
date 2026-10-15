@@ -80,7 +80,7 @@ class ContextPackBuilder:
         course_input: CourseInput, include_generation_constraints: bool
     ) -> dict:
         exclude = set() if include_generation_constraints else {
-            "expected_chapters", "min_effective_chars", "token_limit",
+            "source_policy", "expected_chapters", "min_effective_chars", "token_limit",
         }
         return course_input.model_dump(exclude=exclude)
 
@@ -90,6 +90,7 @@ class ContextPackBuilder:
         mission_ref: ArtifactRef,
         *,
         expected_chapters: int | None = None,
+        source_policy: str | None = None,
     ) -> ContextPack:
         mission = self._load(run_id, mission_ref)
         content = {
@@ -101,6 +102,8 @@ class ContextPackBuilder:
             content["generation_constraints"] = {
                 "expected_chapters": expected_chapters
             }
+        if source_policy:
+            content["source_policy"] = source_policy
         return self._pack(
             "blueprint",
             [
@@ -122,6 +125,7 @@ class ContextPackBuilder:
         lesson_index: int,
         previous_lesson_ref: ArtifactRef | None = None,
         min_effective_chars: int | None = None,
+        source_policy: str | None = None,
     ) -> ContextPack:
         self._load(run_id, mission_ref)
         blueprint = self._load(run_id, blueprint_ref)
@@ -152,6 +156,7 @@ class ContextPackBuilder:
             previous_summary,
             ledger,
             min_effective_chars,
+            source_policy,
         )
         truncated = False
         for field, empty in (
@@ -173,6 +178,7 @@ class ContextPackBuilder:
                         previous_summary,
                         ledger,
                         min_effective_chars,
+                        source_policy,
                     )
         return self._pack("writer", inputs, truncated=truncated)
 
@@ -233,12 +239,15 @@ class ContextPackBuilder:
         previous_summary: str,
         ledger: list[dict],
         min_effective_chars: int | None,
+        source_policy: str | None,
     ) -> list[AgentInput]:
         mission_content = {}
         if min_effective_chars is not None:
             mission_content["generation_constraints"] = {
                 "min_effective_chars": min_effective_chars
             }
+        if source_policy:
+            mission_content["source_policy"] = source_policy
         return [
             AgentInput(
                 kind="mission",

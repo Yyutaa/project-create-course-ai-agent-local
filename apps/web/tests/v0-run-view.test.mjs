@@ -199,6 +199,7 @@ test("course creation action exposes its real execution state", () => {
 
 test("generation constraints and token usage have stable readable labels", () => {
   assert.deepEqual(generationConstraintLabels({
+    source_policy: "允许使用用户资料与公开官方资料",
     expected_chapters: 12,
     min_effective_chars: 12000,
     token_limit: null,
@@ -206,6 +207,7 @@ test("generation constraints and token usage have stable readable labels", () =>
     "期望章节：12（允许 ±1 章偏差）",
     "单章下限：12,000 有效字符",
     "Token 阈值：不限制",
+    "来源政策：允许使用用户资料与公开官方资料",
   ]);
   assert.equal(budgetTokenLabel({
     tokens_used: 180,
@@ -240,6 +242,7 @@ test("new course payload includes explicit generation constraint defaults", asyn
       audience: "初学者",
       goal: "学习变量",
       language: "zh",
+      source_policy: "允许使用用户资料与公开官方资料",
       expected_chapters: 12,
       min_effective_chars: 12000,
       token_limit: null,
@@ -249,6 +252,7 @@ test("new course payload includes explicit generation constraint defaults", asyn
       audience: "初学者",
       goal: "学习变量",
       language: "zh",
+      source_policy: "允许使用用户资料与公开官方资料",
       expected_chapters: 12,
       min_effective_chars: 12000,
       token_limit: null,

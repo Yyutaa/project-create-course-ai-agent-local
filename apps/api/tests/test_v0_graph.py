@@ -156,9 +156,11 @@ def test_blueprint_chapter_count_allows_one_chapter_tolerance(
     assert run.stages[3].status == "succeeded"
     blueprint_input = provider.blueprint_requests[0].inputs[0].content
     assert blueprint_input["generation_constraints"] == {"expected_chapters": 12}
+    assert blueprint_input["source_policy"] == "允许使用用户资料与公开官方资料"
     assert "topic" not in blueprint_input
     assert provider.writer_requests[0].inputs[0].content == {
-        "generation_constraints": {"min_effective_chars": 12_000}
+        "generation_constraints": {"min_effective_chars": 12_000},
+        "source_policy": "允许使用用户资料与公开官方资料",
     }
 
 

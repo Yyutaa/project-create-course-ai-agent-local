@@ -44,6 +44,17 @@ def test_course_input_has_generation_constraint_defaults():
     assert value.expected_chapters == 12
     assert value.min_effective_chars == 12_000
     assert value.token_limit is None
+    assert value.source_policy == "允许使用用户资料与公开官方资料"
+
+
+def test_course_input_rejects_blank_or_overlong_source_policy():
+    with pytest.raises(ValidationError):
+        CourseInput.model_validate({**VALID_INPUT, "source_policy": "   "})
+    with pytest.raises(ValidationError):
+        CourseInput.model_validate({**VALID_INPUT, "source_policy": "x" * 301})
+    assert CourseInput.model_validate(
+        {**VALID_INPUT, "source_policy": "仅公开官方资料"}
+    ).source_policy == "仅公开官方资料"
 
 
 @pytest.mark.parametrize(

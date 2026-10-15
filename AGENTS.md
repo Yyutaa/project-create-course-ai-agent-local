@@ -274,11 +274,17 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 
 ## 课程生成约束
 
-- 现行 SQLite schema 版本为 8，可从 v7 重复迁移。`intakes` 持久保存
-  `expected_chapters`、`min_effective_chars`、`token_limit`，`runs` 保存
-  `constraints_version`。迁移前 Run 固定为版本 0，不追溯执行新约束；新 Run 固定为版本 1。
-- 新 Run 默认期望 12 章、单章至少 12000 个有效字符，Token 默认不限制。三项约束属于
-  不可变 Intake，创建后无编辑入口；创建幂等哈希必须包含三项约束。
+- 现行 SQLite schema 版本为 10，可从 v7 起重复迁移。`intakes` 持久保存
+  `source_policy`、`expected_chapters`、`min_effective_chars`、`token_limit`，`runs` 保存
+  `constraints_version`，`publications` 保存已发布课程。迁移前 Run 固定为版本 0，不追溯
+  执行新约束；新 Run 固定为版本 1。
+- 新 Run 默认期望 12 章、单章至少 12000 个有效字符，Token 默认不限制，来源政策默认
+  `允许使用用户资料与公开官方资料`。四项约束属于不可变 Intake，创建后无编辑入口；
+  创建幂等哈希必须包含四项约束。
+- 来源政策是课程可用的资料来源边界（`用户资料+官方资料` / `仅内部资料` /
+  `仅公开官方资料` / `扩展资料并交叉核验` 四选一），随 Intake 进入 mission、blueprint、
+  writer 的 Context Pack，约束模型的范围与断言口径。V0 不执行真实联网检索与来源登记，
+  政策仅作为约束口径；真正的检索与来源核验属于后续独立能力。
 - Blueprint 实际章节数与期望值相差不超过 1 时继续；超出后在 `batch_plan` 前以
   `blueprint_chapter_deviation` 等待人工。`RESUME` 只接受当前精确 Blueprint 版本，
   写入幂等的 `blueprint.chapter_deviation_accepted` 后继续。
