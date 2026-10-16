@@ -23,6 +23,22 @@ import { api } from "../src/api.ts";
 import * as runView from "../src/run-view.ts";
 import * as idempotency from "../src/idempotency.ts";
 
+test("seven stages keep fixed IDs and screenshot display names", () => {
+  assert.deepEqual([
+    "intake", "mission", "blueprint", "batch_plan", "generation", "quality", "release",
+  ].map(runView.stageDisplayName), [
+    "课程需求", "任务定义", "模块与课程蓝图", "生成批次",
+    "批次生产循环", "整课质量闭环", "课程确认",
+  ]);
+});
+
+test("connected stream reduces polling while retaining a refresh fallback", () => {
+  assert.equal(runView.pollInterval({ status: "running" }, true), 30_000);
+  assert.equal(runView.pollInterval({ status: "waiting_for_human" }, true), 30_000);
+  assert.equal(runView.pollInterval({ status: "running" }, false), 1_000);
+  assert.equal(runView.pollInterval({ status: "published" }, true), false);
+});
+
 
 test("course progress names the current step and its state", () => {
   assert.equal(runView.courseProgressLabel?.({

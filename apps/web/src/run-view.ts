@@ -1,6 +1,10 @@
 import type { ArtifactSummary, BatchPlan, CourseInput, CourseProgress, ExecutionReadModel, Finding, GateResult, LlmConfigStatus, ReviewFinding, V0Run } from "./api";
 
 const STAGES = ["intake", "mission", "blueprint", "batch_plan", "generation", "quality", "release"];
+const STAGE_NAMES = [
+  "课程需求", "任务定义", "模块与课程蓝图", "生成批次",
+  "批次生产循环", "整课质量闭环", "课程确认",
+];
 const STAGE_STATUS_LABELS = {
   pending: "待执行", running: "执行中", succeeded: "已完成", failed: "失败",
   waiting_for_human: "等待人工", stopped: "已停止",
@@ -8,6 +12,11 @@ const STAGE_STATUS_LABELS = {
 
 export function runPath(id: string): string {
   return `/run/${encodeURIComponent(id)}`;
+}
+
+export function stageDisplayName(name: string): string {
+  const index = STAGES.indexOf(name);
+  return index < 0 ? name : STAGE_NAMES[index];
 }
 
 export function courseProgressLabel(course: Pick<CourseProgress, "current_stage" | "stage_status">): string {
@@ -71,8 +80,9 @@ export function shouldPoll(status: V0Run["status"]): boolean {
   return status === "running" || status === "waiting_for_human" || status === "stopped";
 }
 
-export function pollInterval(run?: Pick<V0Run, "status">): number | false {
+export function pollInterval(run?: Pick<V0Run, "status">, streamConnected = false): number | false {
   if (!run || !shouldPoll(run.status)) return false;
+  if (streamConnected) return 30_000;
   return run.status === "running" ? 1000 : 5000;
 }
 

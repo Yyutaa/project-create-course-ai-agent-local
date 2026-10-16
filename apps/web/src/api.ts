@@ -256,6 +256,13 @@ export type DeliveryEvidence = {
   integrity_issues: string[];
 };
 
+export type RunEvent = {
+  id: number;
+  type: string;
+  stage: string | null;
+  created_at: string;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
   if (!response.ok) {
@@ -296,6 +303,7 @@ export const api = {
   courses: () => request<{ items: Course[] }>("/api/courses"),
   startRun: (input: CourseInput, key: string) => post<V0Run>("/api/v0/runs", input, key),
   run: (id: string) => request<V0Run>(`/api/v0/runs/${encodeURIComponent(id)}`),
+  intake: (id: string) => request<CourseInput>(`/api/v0/runs/${encodeURIComponent(id)}/intake`),
   runContent: (id: string) => request<RunContent>(`/api/v0/runs/${encodeURIComponent(id)}/content`),
   decideRelease: (id: string, action: "prepare" | "stop", reason: string, key: string) =>
     post<V0Run>(`/api/v0/runs/${encodeURIComponent(id)}/release`, { action, reason }, key),
@@ -308,6 +316,7 @@ export const api = {
   artifact: (id: string, version: number) => request<ArtifactFact>(`/api/v0/artifacts/${encodeURIComponent(id)}/versions/${version}`),
   execution: (id: string) => request<ExecutionReadModel>(`/api/v0/runs/${encodeURIComponent(id)}/execution`),
   evidence: (id: string) => request<DeliveryEvidence>(`/api/v0/runs/${encodeURIComponent(id)}/evidence`),
+  events: (id: string) => request<{ items: RunEvent[] }>(`/api/v0/runs/${encodeURIComponent(id)}/events`),
   stopRun: (id: string, key: string) => post<ExecutionCommand>(`/api/v0/runs/${encodeURIComponent(id)}/stop`, {}, key),
   resumeRun: (id: string, key: string) => post<ExecutionCommand>(`/api/v0/runs/${encodeURIComponent(id)}/resume`, {}, key),
   reviseRun: (id: string, text: string, checkpoint: string, key: string, providerLimit?: number) =>

@@ -8,6 +8,28 @@
 | 定位 | 本地课程 Agent 的生产控制台，不是聊天 UI |
 | 关联 | [PRD](PRD.md) · [后端与 Agent 设计](BE-TD.md) |
 
+> 当前本地 V0 以 `AGENTS.md` 和 `/api/v0` 代码为准。下文的 `/api/runs`、
+> `features/run/` 等描述记录了早期方案，不应作为现行接口或目录使用。
+
+## 当前 V0：七阶段工作台与实时刷新
+
+Run 工作台使用截图式横向七步导航：课程需求、任务定义、模块与课程蓝图、生成批次、
+批次生产循环、整课质量闭环、课程确认。后端阶段 ID 和顺序仍为
+`intake → mission → blueprint → batch_plan → generation → quality → release`。
+选择阶段后展示安全的输入来源、已提交产物版本与暂停原因；原始 Intake、Prompt 和
+模型响应不进入阶段摘要。Mission、Quality 和 release 的人工操作仍由后端读模型门禁。
+
+页面按三块主区域组织：七阶段条、持久执行与预算状态、阶段输入/输出工作区；
+右侧展示最近 40 条持久 Event。点击阶段或事件只切换查看目标，不推进 Workflow。
+课程文章、产物历史和交付证据仍留在工作区中；运行中的 Intake 不提供编辑入口。
+选择「课程需求」时，工作区左侧显示输入处理状态，右侧从独立 Intake 读取接口展示
+本次创建表单的完整结构化输入与生成约束；该面板只读，不从脱敏 Run 摘要反推原文。
+
+TanStack Query 继续负责 `run`、`execution`、`run-content`、`evidence` 和 `events` 的加载、
+错误与缓存。`GET /api/v0/runs/{run_id}/stream` 的 SSE 只携带 Run ID 与变化序号；
+前端收到通知后失效这些 Query 并用 REST 重读。初次连接和重连时重新校准；
+连接正常时以 30 秒轮询兜底，断线后恢复现有快速/低频轮询策略。
+
 ## 1. 设计目标与边界
 
 前端将后端的课程、Run、Command、节点执行、Artifact、质量门和人工审批转化为可读、可操作的工作台。它不实现 LangGraph 路由、不自行判断课程是否发布，也不根据事件文案猜测当前阶段；这些都以 API 返回的当前事实为准。
