@@ -9,6 +9,7 @@ from app.api.config_routes import router as config_router
 from app.api.course_routes import router as course_router
 from app.api.fact_routes import router as fact_router
 from app.api.run_routes import artifact_router, router as run_router
+from app.api.stream_routes import router as stream_router
 from app.api.system_routes import router as system_router
 from app.catalog import EXAMPLE_COURSE_ROOT, PUBLISHED_ROOT
 
@@ -61,6 +62,7 @@ app.include_router(course_router)
 app.include_router(fact_router)
 app.include_router(config_router)
 app.include_router(run_router)
+app.include_router(stream_router)
 app.include_router(artifact_router)
 if EXAMPLE_COURSE_ROOT.is_dir():
     app.mount(

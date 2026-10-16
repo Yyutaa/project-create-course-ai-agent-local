@@ -66,29 +66,45 @@ class FactStore:
         with self.connect() as connection:
             return connection.execute("PRAGMA user_version").fetchone()[0]
 
+    def change_seq(self, run_id: str) -> int:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT seq FROM run_change_seq WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            return row[0]
+
     def migrate(self) -> None:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version >= 10:
+            if version >= 11:
+                return
+            if version == 10:
+                self._migrate_v11(connection)
                 return
             if version == 9:
                 self._migrate_v10(connection)
+                self._migrate_v11(connection)
                 return
             if version == 8:
                 self._migrate_v9(connection)
                 self._migrate_v10(connection)
+                self._migrate_v11(connection)
                 return
             if version == 7:
                 self._migrate_v8(connection)
                 self._migrate_v9(connection)
                 self._migrate_v10(connection)
+                self._migrate_v11(connection)
                 return
             if version == 6:
                 self._migrate_v7(connection)
                 self._migrate_v8(connection)
                 self._migrate_v9(connection)
                 self._migrate_v10(connection)
+                self._migrate_v11(connection)
                 return
             if version == 5:
                 self._migrate_v6(connection)
@@ -96,6 +112,7 @@ class FactStore:
                 self._migrate_v8(connection)
                 self._migrate_v9(connection)
                 self._migrate_v10(connection)
+                self._migrate_v11(connection)
                 return
             if version == 4:
                 self._migrate_v5(connection)
@@ -104,6 +121,7 @@ class FactStore:
                 self._migrate_v8(connection)
                 self._migrate_v9(connection)
                 self._migrate_v10(connection)
+                self._migrate_v11(connection)
                 return
             if version == 3:
                 self._migrate_v4(connection)
@@ -113,6 +131,7 @@ class FactStore:
                 self._migrate_v8(connection)
                 self._migrate_v9(connection)
                 self._migrate_v10(connection)
+                self._migrate_v11(connection)
                 return
             if version == 0:
                 connection.execute(
@@ -208,6 +227,7 @@ class FactStore:
             self._migrate_v8(connection)
             self._migrate_v9(connection)
             self._migrate_v10(connection)
+            self._migrate_v11(connection)
 
     @staticmethod
     def _migrate_v4(connection: sqlite3.Connection) -> None:
@@ -329,6 +349,48 @@ class FactStore:
                 )
         connection.execute("PRAGMA user_version=10")
 
+    @staticmethod
+    def _migrate_v11(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS run_change_seq "
+            "(run_id TEXT PRIMARY KEY REFERENCES runs(id), "
+            "seq INTEGER NOT NULL DEFAULT 0)"
+        )
+        has_runs = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'"
+        ).fetchone()
+        if has_runs:
+            connection.execute(
+                "INSERT OR IGNORE INTO run_change_seq SELECT id, 0 FROM runs"
+            )
+            for operation in ("INSERT", "UPDATE"):
+                connection.execute(
+                    f"CREATE TRIGGER IF NOT EXISTS runs_stream_{operation.lower()} "
+                    f"AFTER {operation} ON runs BEGIN "
+                    "INSERT INTO run_change_seq(run_id, seq) VALUES (NEW.id, 1) "
+                    "ON CONFLICT(run_id) DO UPDATE SET seq=seq+1; END"
+                )
+        for table in (
+            "events", "snapshots", "artifacts", "commands", "node_executions",
+            "checkpoints", "run_controls", "provider_calls", "budget_limits",
+            "publications",
+        ):
+            exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            if not exists or not has_runs:
+                continue
+            for operation, row in (("INSERT", "NEW"), ("UPDATE", "NEW"),
+                                   ("DELETE", "OLD")):
+                connection.execute(
+                    f"CREATE TRIGGER IF NOT EXISTS {table}_stream_{operation.lower()} "
+                    f"AFTER {operation} ON {table} BEGIN "
+                    "INSERT INTO run_change_seq(run_id, seq) "
+                    f"VALUES ({row}.run_id, 1) "
+                    "ON CONFLICT(run_id) DO UPDATE SET seq=seq+1; END"
+                )
+        connection.execute("PRAGMA user_version=11")
+
     def mission_review_required(self, run_id: str) -> bool:
         with self.connect() as connection:
             row = connection.execute(
@@ -422,6 +484,19 @@ class FactStore:
     def get_run(self, run_id: str) -> V0Run:
         with self.connect() as connection:
             return self._get_run(connection, run_id)
+
+    def list_run_events(self, run_id: str, limit: int = 40) -> list[dict]:
+        with self.connect() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM runs WHERE id=?", (run_id,)
+            ).fetchone()
+            if exists is None:
+                raise KeyError(run_id)
+            rows = connection.execute(
+                "SELECT id, type, stage, created_at FROM events WHERE run_id=? "
+                "ORDER BY id DESC LIMIT ?", (run_id, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     def _get_run(self, connection: sqlite3.Connection, run_id: str) -> V0Run:
         current = connection.execute(

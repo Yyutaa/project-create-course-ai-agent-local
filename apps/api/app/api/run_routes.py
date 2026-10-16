@@ -2,7 +2,7 @@ from typing import Annotated, Literal
 from functools import lru_cache
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
 
 from app.catalog import CatalogError
@@ -46,6 +46,17 @@ IdempotencyKey = Annotated[str, Header(min_length=1, alias="Idempotency-Key")]
 
 class ArtifactList(BaseModel):
     items: list[ArtifactSummary]
+
+
+class RunEvent(BaseModel):
+    id: int
+    type: str
+    stage: str | None
+    created_at: str
+
+
+class RunEventList(BaseModel):
+    items: list[RunEvent]
 
 
 class RevisionInput(BaseModel):
@@ -139,6 +150,14 @@ def read_run_content(run_id: str, runner: RunnerDep) -> RunContent:
         raise HTTPException(status_code=404, detail="Run 不存在") from error
 
 
+@router.get("/{run_id}/intake", response_model=CourseInput)
+def read_run_intake(run_id: str, runner: RunnerDep) -> CourseInput:
+    try:
+        return runner.get(run_id).course_input
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Run 不存在") from error
+
+
 def _accept_command(
     run_id: str, kind: str, payload: dict, runner: V0Runner, key: str
 ) -> Command:
@@ -208,6 +227,16 @@ def read_execution(run_id: str, runner: RunnerDep) -> ExecutionReadModel:
 def read_evidence(run_id: str, runner: RunnerDep) -> DeliveryEvidence:
     try:
         return DeliveryStore(runner.store.path).read(run_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Run 不存在") from error
+
+
+@router.get("/{run_id}/events", response_model=RunEventList)
+def read_run_events(
+    run_id: str, runner: RunnerDep, limit: Annotated[int, Query(ge=1, le=100)] = 40,
+) -> RunEventList:
+    try:
+        return RunEventList(items=runner.store.list_run_events(run_id, limit))
     except KeyError as error:
         raise HTTPException(status_code=404, detail="Run 不存在") from error
 

@@ -279,7 +279,7 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 
 ## 课程生成约束
 
-- 现行 SQLite schema 版本为 10，可从 v7 起重复迁移。`intakes` 持久保存
+- 现行 SQLite schema 版本为 11，可从 v7 起重复迁移。`intakes` 持久保存
   `source_policy`、`expected_chapters`、`min_effective_chars`、`token_limit`，`runs` 保存
   `constraints_version`，`publications` 保存已发布课程。迁移前 Run 固定为版本 0，不追溯
   执行新约束；新 Run 固定为版本 1。
@@ -303,6 +303,14 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 - Token 阈值不改变既有 48/60 次 Provider 调用预算、质量返工预算、七步顺序或人工
   release 权限。约束状态进入安全读取模型和证据索引，但不得复制 Intake、正文、Prompt、
   模型原始响应或密钥。
+
+## Run 状态订阅
+
+- SQLite v11 的 `run_change_seq` 是按 Run 单调递增的读取变化游标，相关事实与投影表的
+  写入在同一事务中推进它；事务回滚不得发出变化。它不替代 Event、Artifact 或 Snapshot。
+- `GET /api/v0/runs/{run_id}/stream` 只发送 Run ID 和变化序号。前端通过 SSE 通知
+  失效 TanStack Query 缓存，再从 REST 读取权威事实；断线时继续低频轮询校准。
+- 七阶段 UI 仅改变显示名称与阅读方式，不改变固定阶段顺序、人工门禁或发布权。
 
 ## 代码规范
 

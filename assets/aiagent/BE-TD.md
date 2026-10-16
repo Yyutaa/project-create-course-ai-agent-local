@@ -1,5 +1,23 @@
 # AI Course Studio：后端与 Agent 技术设计
 
+> 当前本地 V0 以 `AGENTS.md` 和 `/api/v0` 代码为准。下文的 `/api/runs`、
+> `.course-agent/agent.db` 等描述记录了早期方案，不应作为现行接口或数据库使用。
+
+## 当前 V0：Run 状态订阅
+
+SQLite schema v11 的 `run_change_seq` 由相关事实与投影表的触发器在写事务中推进，
+覆盖阶段 Event/Snapshot、Artifact、Command、NodeExecution、checkpoint、控制与预算变化。
+独立 Worker 不向 API 进程发送内存事件。API 的
+`GET /api/v0/runs/{run_id}/stream` 每秒检查一次变化序号，仅在序号变化时发送
+`run.changed` SSE；流消息只包含 Run ID 和序号。连接建立立即发送当前序号，
+断线后的前端重新请求 REST 读模型。SSE 不改变 Graph 顺序、lease 围栏或人工 release 权限。
+
+`GET /api/v0/runs/{run_id}/events?limit=40` 按 Event ID 倒序读取最近的持久事件，
+只返回 ID、类型、阶段与时间；不返回输入、输出、失败详情、审批意见或原始 payload。
+该接口用于运行记录，不参与状态判定与执行推进。
+`GET /api/v0/runs/{run_id}/intake` 是本地作者查看面的只读原始 Intake 接口，
+返回创建时已校验的 `CourseInput`；普通 Run 摘要继续隐藏主题、受众与目标。
+
 | 属性 | 内容 |
 | --- | --- |
 | 目录 | `apps/api/` |

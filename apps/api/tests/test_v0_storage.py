@@ -16,7 +16,7 @@ def test_migration_is_repeatable_and_preserves_rows(tmp_path):
             ("c1", "第一门课", "c1", "2026-09-22T00:00:00Z"),
         )
     store.migrate()
-    assert store.schema_version() == 10
+    assert store.schema_version() == 11
     with store.connect() as connection:
         assert (
             connection.execute("SELECT title FROM courses WHERE id='c1'").fetchone()[0]
@@ -43,7 +43,7 @@ def test_v7_migration_preserves_legacy_run_without_enabling_constraints(tmp_path
     store.migrate()
     store.migrate()
 
-    assert store.schema_version() == 10
+    assert store.schema_version() == 11
     with store.connect() as connection:
         run = connection.execute(
             "SELECT constraints_version FROM runs WHERE id='legacy-run'"
@@ -137,7 +137,7 @@ def test_migration_upgrades_v1_artifacts_without_inventing_provenance(tmp_path):
     store = storage.FactStore(path)
     store.migrate()
 
-    assert store.schema_version() == 10
+    assert store.schema_version() == 11
     with store.connect() as connection:
         columns = {
             row[1] for row in connection.execute("PRAGMA table_info(artifacts)").fetchall()
@@ -224,7 +224,7 @@ def test_v2_database_upgrades_to_execution_protocol_without_recreating_runs(tmp_
     store.migrate()
 
     with store.connect() as connection:
-        assert store.schema_version() == 10
+        assert store.schema_version() == 11
         assert connection.execute("SELECT id FROM runs").fetchone()[0] == "existing-run"
         assert connection.execute(
             "SELECT mission_review_required FROM runs WHERE id='existing-run'"
