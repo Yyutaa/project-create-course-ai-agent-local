@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import os
 from typing import Literal, Protocol
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
+from langchain_core.exceptions import OutputParserException
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_deepseek import ChatDeepSeek
+from langsmith import tracing_context
+from openai import APIConnectionError, APIStatusError, APITimeoutError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.v0.local_config import ConfigError, LocalConfigStore
@@ -90,53 +93,49 @@ class RealProvider:
             ],
         }
         inputs = [item.model_dump(mode="json") for item in request.inputs]
-        payload = {
-            "model": self.model,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {
-                    "role": "system",
-                    "content": json.dumps(system, ensure_ascii=False),
-                },
-                {
-                    "role": "user",
-                    "content": json.dumps({"inputs": inputs}, ensure_ascii=False),
-                },
-            ],
-        }
-        http_request = Request(
-            f"{self.base_url.rstrip('/')}/chat/completions",
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
+        messages = ChatPromptTemplate.from_messages(
+            [("system", "{system}"), ("human", "{inputs}")]
+        ).format_messages(
+            system=json.dumps(system, ensure_ascii=False),
+            inputs=json.dumps({"inputs": inputs}, ensure_ascii=False),
         )
 
         try:
-            with urlopen(http_request, timeout=240) as response:
-                body = json.load(response)
-            content = body["choices"][0]["message"]["content"]
-            if not isinstance(content, str):
-                raise ValueError("模型未返回文本")
-            result = json.loads(content)
-            if not isinstance(result, dict):
+            model = ChatDeepSeek(
+                model=self.model,
+                base_url=self.base_url,
+                api_key=self.api_key,
+                timeout=240,
+                max_retries=0,
+            )
+            structured = model.with_structured_output(
+                request.output_schema, method="json_mode", include_raw=True
+            )
+            with tracing_context(enabled=False):
+                response = structured.invoke(messages)
+            result = response["parsed"]
+            if not isinstance(result, dict) and response["parsing_error"] is None:
                 raise ProviderError(f"{request.role} 模型必须返回 JSON 对象")
-            usage = body.get("usage") or {}
+            if response["parsing_error"] is not None:
+                raise ProviderError(f"{request.role} 模型输出不是有效 JSON 对象")
+            usage = response["raw"].usage_metadata or {}
             return AgentResponse(
                 role=request.role, payload=result,
-                input_tokens=usage.get("prompt_tokens"),
-                output_tokens=usage.get("completion_tokens"),
+                input_tokens=usage.get("input_tokens"),
+                output_tokens=usage.get("output_tokens"),
             )
-        except HTTPError as error:
-            raise ProviderError(f"{request.role} 模型接口返回 HTTP {error.code}") from error
-        except (URLError, TimeoutError, OSError) as error:
-            raise ProviderError(f"{request.role} 模型接口不可用或超时") from error
+        except APIStatusError as error:
+            raise ProviderError(
+                f"{request.role} 模型接口返回 HTTP {error.status_code}"
+            ) from None
+        except (APIConnectionError, APITimeoutError):
+            raise ProviderError(f"{request.role} 模型接口不可用或超时") from None
         except ProviderError:
             raise
-        except (KeyError, IndexError, TypeError, ValueError) as error:
-            raise ProviderError(f"{request.role} 模型输出不是有效 JSON 对象") from error
+        except (OutputParserException, KeyError, TypeError, ValueError):
+            raise ProviderError(f"{request.role} 模型输出不是有效 JSON 对象") from None
+        except Exception:
+            raise ProviderError(f"{request.role} 模型调用失败") from None
 
 
 class LocalConfiguredProvider:

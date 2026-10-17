@@ -1,7 +1,8 @@
 import json
-from io import BytesIO
 
+import httpx
 import pytest
+from langchain_deepseek import ChatDeepSeek
 
 from app.v0.provider import (
     AgentInput,
@@ -78,50 +79,102 @@ def test_real_provider_accepts_existing_repository_environment_names(monkeypatch
     assert provider.api_key == "existing-private-token"
 
 
-def test_real_provider_posts_structured_request_and_returns_json_object(monkeypatch):
+def test_real_provider_uses_langchain_prompt_and_structured_output(monkeypatch):
     monkeypatch.setenv("COURSE_LLM_BASE_URL", "https://example.invalid/v1")
     monkeypatch.setenv("COURSE_LLM_MODEL", "classroom-model")
     monkeypatch.setenv("COURSE_LLM_API_KEY", "private-test-token")
     calls = []
+    settings = []
 
-    def fake_urlopen(request, timeout):
-        calls.append((request, timeout))
+    def respond(request):
+        calls.append(request)
         output = {
             "audience": "零基础学习者",
             "learning_goal": "理解变量",
             "scope": "变量定义与修改",
             "stop_conditions": ["来源不足时暂停"],
         }
-        return BytesIO(
-            json.dumps({"choices": [{"message": {"content": json.dumps(output)}}]}).encode()
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test", "object": "chat.completion",
+                "created": 1, "model": "classroom-model",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": json.dumps(output)},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 17, "completion_tokens": 9,
+                          "total_tokens": 26},
+            },
         )
 
-    monkeypatch.setattr("app.v0.provider.urlopen", fake_urlopen)
+    def chat_model(**kwargs):
+        settings.append(kwargs)
+        return ChatDeepSeek(
+            **kwargs, http_client=httpx.Client(transport=httpx.MockTransport(respond))
+        )
+
+    monkeypatch.setattr("app.v0.provider.ChatDeepSeek", chat_model)
     result = RealProvider.from_env().invoke(mission_request())
 
     assert result.role == "mission"
     assert result.payload["learning_goal"] == "理解变量"
-    request, timeout = calls[0]
-    body = json.loads(request.data)
-    assert request.full_url == "https://example.invalid/v1/chat/completions"
-    assert request.get_header("Authorization") == "Bearer private-test-token"
+    assert (result.input_tokens, result.output_tokens) == (17, 9)
+    assert len(calls) == 1
+    body = json.loads(calls[0].content)
+    assert str(calls[0].url) == "https://example.invalid/v1/chat/completions"
+    assert calls[0].headers["Authorization"] == "Bearer private-test-token"
     assert body["model"] == "classroom-model"
     assert body["response_format"] == {"type": "json_object"}
     assert "output_schema" in body["messages"][0]["content"]
     assert "Python 变量" in body["messages"][1]["content"]
-    assert timeout == 240
+    assert settings[0]["timeout"] == 240
+    assert settings[0]["max_retries"] == 0
 
 
 def test_real_provider_rejects_non_object_json_without_echoing_content(monkeypatch):
-    def fake_urlopen(request, timeout):
-        content = json.dumps(["private-do-not-echo"])
-        return BytesIO(
-            json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+    def respond(request):
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test", "object": "chat.completion",
+                "created": 1, "model": "test-model",
+                "choices": [{"index": 0, "message": {
+                    "role": "assistant", "content": '["private-do-not-echo"]',
+                }, "finish_reason": "stop"}],
+            },
         )
 
-    monkeypatch.setattr("app.v0.provider.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "app.v0.provider.ChatDeepSeek",
+        lambda **kwargs: ChatDeepSeek(
+            **kwargs, http_client=httpx.Client(transport=httpx.MockTransport(respond))
+        ),
+    )
     with pytest.raises(ProviderError, match="mission.*JSON 对象") as caught:
         RealProvider("https://example.invalid", "test-model", "test-key").invoke(
             mission_request()
         )
+    assert "private-do-not-echo" not in str(caught.value)
+
+
+def test_real_provider_does_not_retry_or_echo_network_errors(monkeypatch):
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        raise httpx.ReadTimeout("private-do-not-echo")
+
+    monkeypatch.setattr(
+        "app.v0.provider.ChatDeepSeek",
+        lambda **kwargs: ChatDeepSeek(
+            **kwargs, http_client=httpx.Client(transport=httpx.MockTransport(respond))
+        ),
+    )
+    with pytest.raises(ProviderError) as caught:
+        RealProvider("https://example.invalid", "test-model", "test-key").invoke(
+            mission_request()
+        )
+    assert len(calls) == 1
     assert "private-do-not-echo" not in str(caught.value)

@@ -6,6 +6,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
   "fastapi==0.139.2",
   "langgraph==1.2.9",
+  "langchain-deepseek==1.1.1",
   "keyring==25.7.0",
   "pydantic==2.13.4",
   "uvicorn[standard]==0.41.0",
