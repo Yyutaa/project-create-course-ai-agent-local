@@ -21,14 +21,22 @@ SQLite schema v11 的 `run_change_seq` 由相关事实与投影表的触发器�
 | 属性 | 内容 |
 | --- | --- |
 | 目录 | `apps/api/` |
-| 技术栈 | Python 3.12、FastAPI 0.139、Pydantic 2、LangChain 1、LangGraph 1、SQLite、Uvicorn |
-| Provider | 本地 Codex Gateway、DeepSeek、Fake Provider（测试） |
+| 技术栈 | Python 3.12、FastAPI 0.139、Pydantic 2、LangGraph 1、`langchain-core`、`langchain-deepseek`、SQLite、Uvicorn |
+| Provider | DeepSeek（正常流程）、Fake Provider（测试） |
 | 定位 | 课程生产领域内核、持久 Command/Worker、Agent Runtime 与质量闭环 |
 | 关联 | [PRD](PRD.md) · [前端设计](FE-TD.md) |
 
+> 当前 V0 实现以 `AGENTS.md` 和 `apps/api/app/v0/` 为准。下文保留了早期目标设计，
+> 其中的 Codex Gateway、LangGraph 内置 checkpointer 等描述不代表已实现能力。
+> 现行实现使用 LangChain Prompt 模板、`ChatDeepSeek` 和 JSON mode 解析；
+> `AgentExecutor` 继续执行 Pydantic 校验。七阶段路由、节点状态、租约、预算、
+> checkpoint 与人工决策仍由现有 LangGraph Node 和本地 Worker/SQLite 协议控制。
+
 ## 1. 架构概览
 
-后端将短 HTTP 请求与长课程生成拆开：FastAPI 负责校验、查询和提交 Command；独立 `app.worker` 从 SQLite 领取 Command；`WorkflowRuntime` 用 LangGraph 运行新课程或历史课程 Review 图；课程 Markdown 写入文件系统，业务运行数据与 LangGraph checkpoint 写入本地 SQLite。
+现行 V0 将短 HTTP 请求与长课程生成拆开：FastAPI 负责校验、查询和提交 Command；独立 Worker 从 SQLite 领取 Command；LangGraph `StateGraph` 按固定七阶段推进。业务事实与自有 checkpoint 保存在 `.course-agent/v0-facts.sqlite3`，课程 Markdown 写入 Course Workspace。
+
+下面的架构图和目录树记录早期目标设计，不代表当前仓库的实际目录或已实现能力。
 
 ```mermaid
 flowchart LR
@@ -50,8 +58,8 @@ flowchart LR
 | 层 | 技术 | 作用 |
 | --- | --- | --- |
 | HTTP API | FastAPI + Pydantic | 路由、输入校验、OpenAPI、错误码 |
-| Agent 编排 | LangGraph + sqlite checkpointer | 图执行、条件路由、`interrupt()`、失败恢复 |
-| 模型调用 | LangChain、`langchain-deepseek`、Gateway adapter | 结构化输出、超时、Provider 能力适配 |
+| Agent 编排 | LangGraph `StateGraph` + 自有 SQLite checkpoint | 固定七阶段路由；Worker 持租约恢复 |
+| 模型调用 | `langchain-core` Prompt、`langchain-deepseek` | DeepSeek JSON mode 输出解析；`Provider` 保留统一请求/响应契约 |
 | 业务持久化 | Python `sqlite3` | Run、事件、Artifact、RepairTask、Command、Trace、预算 |
 | 文件事实源 | 本地课程目录 | Workspace、Markdown、HTML、质量快照、课程资源 |
 | 长任务 | 独立 `app.worker` 进程 | Command 租约、心跳、恢复、停止 |
@@ -77,11 +85,11 @@ apps/api/app/
 
 ## 3. 配置、Provider 与启动
 
-`config.py` 以仓库根目录推导 `courses_root` 和 `.course-agent/`，从 `apps/api/.env` 读取配置。默认使用 Codex Gateway；也可切换 DeepSeek。关键配置包括 Provider/Model、超时、输出 token 上限、单章质量尝试次数、自动发现循环次数、Worker 轮询间隔与租约秒数。
+现行 V0 从本机配置读取 DeepSeek 模型，Key 只保存在系统凭据库。Worker 每次模型调用前重新读取配置；`RealProvider` 使用 `ChatPromptTemplate` 和 `ChatDeepSeek.with_structured_output(..., method="json_mode")`，设置 240 秒超时和零次自动重试，避免一次预算预留对应多次实际调用。
 
-`scripts/start-agent.sh` 会创建 `apps/api/.venv`，安装 `pyproject.toml` 声明的依赖，并分别启动 Uvicorn、Worker 和 Vite。API 和 Worker 是两个进程，但共享同一个 `.course-agent/agent.db`、`checkpoints.db` 和 `courses/`。
+`scripts/start-agent.sh` 会创建 `apps/api/.venv`，安装 `pyproject.toml` 声明的依赖，并分别启动 Uvicorn、Worker 和 Vite。API 和 Worker 共享 `.course-agent/v0-facts.sqlite3`；当前 Graph 不使用 LangGraph 内置 checkpointer。
 
-Provider 层必须吸收模型差异：不能假定每个模型支持相同的 `tool_choice`、thinking 模式或 JSON 输出。`CourseAgentRuntime` 通过 Pydantic schema 请求结构化结果；Humanizer 使用小范围补丁 schema，避免在 JSON 中返回整章长文。
+当前 `Provider` 只接入 DeepSeek。LangChain 负责构造 Prompt、发起模型调用和解析 JSON；`AgentExecutor` 用 Pydantic 校验候选输出。模型不能直接提交 Artifact、改变阶段或决定 release。
 
 ## 4. API 设计
 
