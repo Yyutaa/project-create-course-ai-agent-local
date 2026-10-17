@@ -965,6 +965,7 @@ button.secondary {
 }
 
 .stage-number {
+  position: relative;
   display: grid;
   flex: none;
   place-items: center;
@@ -976,6 +977,21 @@ button.secondary {
   color: #506058;
   font-size: 12px;
   font-weight: 700;
+}
+
+.stage-step.agent-active:not(.motion-paused) .stage-number::after {
+  position: absolute;
+  inset: -4px;
+  border: 2px solid #5d8b43;
+  border-radius: 50%;
+  content: "";
+  pointer-events: none;
+  animation: agent-ring 1.6s ease-out infinite;
+}
+
+@keyframes agent-ring {
+  from { opacity: .8; transform: scale(.85); }
+  to { opacity: 0; transform: scale(1.45); }
 }
 
 .stage-step.succeeded .stage-number {
@@ -1110,6 +1126,82 @@ button.secondary {
 .run-execution .execution-card {
   border-top: 1px solid var(--line);
   padding: 16px 18px;
+}
+
+.execution-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.execution-heading h2 {
+  margin: 0;
+}
+
+.motion-toggle {
+  min-height: 30px;
+  padding: 5px 9px;
+  border-color: var(--line);
+  color: #405247;
+  background: #f4f7f2;
+  font-size: 11px;
+}
+
+.motion-toggle:hover:not(:disabled) {
+  color: #253b2a;
+  background: #e8f2e3;
+}
+
+.execution-activity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  margin: 10px 0;
+  color: #34634a;
+  font-size: 13px;
+}
+
+.activity-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.activity-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.execution-activity.is-animated .activity-dots i {
+  animation: agent-dot 1.4s ease-in-out infinite;
+}
+
+.execution-activity.is-animated .activity-dots i:nth-child(2) {
+  animation-delay: .18s;
+}
+
+.execution-activity.is-animated .activity-dots i:nth-child(3) {
+  animation-delay: .36s;
+}
+
+@keyframes agent-dot {
+  0%, 65%, 100% { opacity: .45; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-2px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stage-step.agent-active .stage-number::after,
+  .execution-activity.is-animated .activity-dots i {
+    animation: none;
+  }
+
+  .motion-toggle {
+    display: none;
+  }
 }
 
 .workspace-panel {

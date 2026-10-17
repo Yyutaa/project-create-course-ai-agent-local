@@ -11,11 +11,14 @@ export function activeStage(run: V0Run): StageRecord {
     ?? run.stages[0];
 }
 
-export function StageStepper({ run, selectedStage, onSelect, streamConnected }: {
+export function StageStepper({ run, selectedStage, onSelect, streamConnected,
+  agentExecuting, motionPaused }: {
   run: V0Run;
   selectedStage: StageRecord["name"] | null;
   onSelect: (stage: StageRecord["name"]) => void;
   streamConnected: boolean;
+  agentExecuting: boolean;
+  motionPaused: boolean;
 }) {
   const current = activeStage(run);
   const displayed = run.stages.find((stage) => stage.name === selectedStage) ?? current;
@@ -32,13 +35,14 @@ export function StageStepper({ run, selectedStage, onSelect, streamConnected }: 
         {run.stages.map((stage, index) => (
           <li key={stage.name}>
             <button type="button"
-              className={`stage-step ${stage.status} ${current.name === stage.name ? "current" : ""} ${displayed.name === stage.name ? "selected" : ""}`}
+              className={`stage-step ${stage.status} ${current.name === stage.name ? "current" : ""} ${displayed.name === stage.name ? "selected" : ""} ${agentExecuting && current.name === stage.name && stage.status === "running" ? "agent-active" : ""} ${motionPaused ? "motion-paused" : ""}`}
               aria-current={current.name === stage.name ? "step" : undefined}
               aria-pressed={displayed.name === stage.name}
               onClick={() => onSelect(stage.name)}>
               <span className="stage-number">{stage.status === "succeeded" ? "✓" : index + 1}</span>
               <span><strong>{stageDisplayName(stage.name)}</strong><small>{
-                stage.status === "pending" && current.name === stage.name
+                agentExecuting && current.name === stage.name && stage.status === "running"
+                  ? "Agent 运行中" : stage.status === "pending" && current.name === stage.name
                   ? "当前节点" : statusLabels[stage.status]
               }</small></span>
             </button>

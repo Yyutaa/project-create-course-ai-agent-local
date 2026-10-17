@@ -42,6 +42,7 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
   const [revisionText, setRevisionText] = useState("");
   const [missionFeedback, setMissionFeedback] = useState("");
   const [qualityReason, setQualityReason] = useState("");
+  const [motionPaused, setMotionPaused] = useState(false);
   const [streamConnected, setStreamConnected] = useState(false);
   const [selectedStage, setSelectedStage] = useState<StageRecord["name"] | null>(null);
   useEffect(() => setSelectedStage(null), [runId]);
@@ -78,6 +79,16 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
       return pollInterval(run, streamConnected);
     },
   });
+  const activeCommand = executionQuery.data?.commands.filter(
+    (command) => command.status === "ACCEPTED" || command.status === "CLAIMED",
+  ).at(-1);
+  const agentExecuting = run?.status === "running"
+    && activeCommand?.status === "CLAIMED"
+    && executionQuery.data?.node_status === "STARTED";
+  const activityLabel = run?.status !== "running" ? null
+    : activeCommand?.status === "ACCEPTED" ? "等待 Worker 接管"
+      : agentExecuting ? "Agent 正在执行当前节点"
+        : activeCommand?.status === "CLAIMED" ? "Worker 正在处理" : "工作流运行中";
   const evidenceQuery = useQuery({
     queryKey: ["evidence", runId],
     queryFn: () => api.evidence(runId!),
@@ -314,7 +325,8 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
         <div className="run-layout">
           <div className="run-main">
             <StageStepper run={run} selectedStage={selectedStage}
-              onSelect={setSelectedStage} streamConnected={streamConnected} />
+              onSelect={setSelectedStage} streamConnected={streamConnected}
+              agentExecuting={agentExecuting} motionPaused={motionPaused} />
             <div className="run-execution" aria-label="持久执行状态">
               <section aria-live="polite" className="run-summary">
             <h2>运行摘要</h2>
@@ -323,7 +335,18 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
             <p>当前状态：{run.status}</p>
           </section>
               <section className="result-card execution-card" aria-label="执行工作台">
-            <h2>执行工作台</h2>
+            <div className="execution-heading">
+              <h2>执行工作台</h2>
+              <button type="button" className="motion-toggle" aria-pressed={motionPaused}
+                onClick={() => setMotionPaused((paused) => !paused)}>
+                {motionPaused ? "恢复动效" : "暂停动效"}
+              </button>
+            </div>
+            {activityLabel && <p className={`execution-activity ${agentExecuting && !motionPaused ? "is-animated" : ""}`}
+              role="status">
+              <strong>{activityLabel}</strong>
+              {agentExecuting && <span className="activity-dots" aria-hidden="true"><i /><i /><i /></span>}
+            </p>}
             <p>当前节点：{executionQuery.data?.current_node ?? "待领取"}；节点尝试：{executionQuery.data?.node_status ?? "未开始"}</p>
             <p>最后 checkpoint：{executionQuery.data?.checkpoint?.position ?? "无"}（{executionQuery.data?.checkpoint?.id ?? "无"}）</p>
             {executionQuery.data?.waiting_reason && <p>等待人工：{executionQuery.data.waiting_reason}</p>}
