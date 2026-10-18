@@ -219,8 +219,8 @@ export type ExecutionReadModel = {
     checkpoint_id: string | null;
   } | null;
   quality_review: {
-    status: "pending";
-    quality_ref: ArtifactRef;
+    status: "pending" | "retry_only";
+    quality_ref: ArtifactRef | null;
     lesson_ref: ArtifactRef;
     checkpoint_id: string;
   } | null;
@@ -330,10 +330,10 @@ export const api = {
       action, mission_ref: missionRef, expected_checkpoint_id: checkpoint,
       ...(action === "revise" ? { feedback } : {}),
     }, key),
-  reviewQuality: (id: string, action: "retry" | "accept", qualityRef: ArtifactRef,
+  reviewQuality: (id: string, action: "retry" | "accept", qualityRef: ArtifactRef | null,
     lessonRef: ArtifactRef, checkpoint: string, reason: string | undefined, key: string) =>
     post<ExecutionCommand>(`/api/v0/runs/${encodeURIComponent(id)}/quality-review`, {
-      action, quality_ref: qualityRef, lesson_ref: lessonRef,
+      action, ...(qualityRef ? { quality_ref: qualityRef } : {}), lesson_ref: lessonRef,
       expected_checkpoint_id: checkpoint,
       ...(action === "accept" ? { reason } : {}),
     }, key),

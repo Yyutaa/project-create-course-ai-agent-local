@@ -27,10 +27,30 @@ SAFE_MESSAGES = frozenset({
     "课程目录写入失败",
 })
 
+REVIEWER_SCHEMA_ERROR = re.compile(
+    r"reviewer (rubric|humanizer) 输出校验失败："
+    r"(status|checks|findings|language_risk|limitations)"
+    r"(?:\.[0-9]+|\.[a-z_]+)* \([a-z_]+\)"
+)
+HIDDEN_PROVIDER_ERROR = "ProviderError：细节已隐藏，请检查受限诊断信息"
+
+
+def is_reviewer_schema_error(message: str) -> bool:
+    return REVIEWER_SCHEMA_ERROR.fullmatch(message) is not None
+
+
+def safe_recorded_error(message: str) -> str:
+    """Preserve already-sanitized facts without exposing arbitrary stored text."""
+    if message == HIDDEN_PROVIDER_ERROR or is_reviewer_schema_error(message):
+        return message
+    return safe_error(RuntimeError(message))
+
 
 def safe_error(error: Exception) -> str:
     message = str(error)
     if message in SAFE_MESSAGES:
+        return message
+    if is_reviewer_schema_error(message):
         return message
     if re.fullmatch(r"(mission|blueprint|writer|reviewer|repair) 模型接口返回 HTTP [0-9]{3}", message):
         return message

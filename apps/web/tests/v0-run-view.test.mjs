@@ -154,6 +154,24 @@ test("quality review requires the current waiting checkpoint and exact refs", ()
   }), false);
 });
 
+test("failed Reviewer schema output offers only an exact-checkpoint retry", () => {
+  const run = { status: "failed", stages: [{ name: "quality", status: "failed" }] };
+  const execution = {
+    checkpoint: { id: "cp-failed" }, commands: [],
+    quality_review: {
+      status: "retry_only", checkpoint_id: "cp-failed", quality_ref: null,
+      lesson_ref: { artifact_id: "lesson-1", version: 1 },
+    },
+  };
+  assert.equal(canReviewQuality(run, execution), true);
+  assert.equal(canReviewQuality(run, {
+    ...execution, checkpoint: { id: "stale" },
+  }), false);
+  assert.equal(canReviewQuality(run, {
+    ...execution, quality_review: { ...execution.quality_review, status: "pending" },
+  }), false);
+});
+
 test("quality review API submits retry and accepted risk decisions", async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];
@@ -179,6 +197,9 @@ test("quality review API submits retry and accepted risk decisions", async () =>
     await api.reviewQuality(
       "run-1", "accept", qualityRef, lessonRef, "cp-1", "人工接受", "accept-key",
     );
+    await api.reviewQuality(
+      "run-1", "retry", null, lessonRef, "cp-failed", undefined, "failed-retry-key",
+    );
     assert.deepEqual(calls.map(({ path, init }) => [
       path,
       JSON.parse(init.body),
@@ -192,6 +213,10 @@ test("quality review API submits retry and accepted risk decisions", async () =>
         action: "accept", quality_ref: qualityRef, lesson_ref: lessonRef,
         expected_checkpoint_id: "cp-1", reason: "人工接受",
       }, "accept-key"],
+      ["/api/v0/runs/run-1/quality-review", {
+        action: "retry", lesson_ref: lessonRef,
+        expected_checkpoint_id: "cp-failed",
+      }, "failed-retry-key"],
     ]);
   } finally {
     globalThis.fetch = originalFetch;

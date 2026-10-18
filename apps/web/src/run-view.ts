@@ -171,11 +171,16 @@ export function canReviewQuality(
   run: Pick<V0Run, "status" | "stages">,
   execution: Pick<ExecutionReadModel, "checkpoint" | "commands" | "quality_review"> | null | undefined,
 ): boolean {
-  return run.status === "waiting_for_human"
+  const status = execution?.quality_review?.status;
+  const manual = run.status === "waiting_for_human"
     && run.stages.find((stage) => stage.name === "quality")?.status === "waiting_for_human"
-    && execution?.quality_review?.status === "pending"
-    && execution.quality_review.checkpoint_id === execution.checkpoint?.id
-    && !execution.commands.some((command) =>
+    && status === "pending";
+  const retryOnly = run.status === "failed"
+    && run.stages.find((stage) => stage.name === "quality")?.status === "failed"
+    && status === "retry_only";
+  return (manual || retryOnly)
+    && execution?.quality_review?.checkpoint_id === execution?.checkpoint?.id
+    && !execution?.commands.some((command) =>
       command.kind === "QUALITY_REVIEW"
       && (command.status === "ACCEPTED" || command.status === "CLAIMED"));
 }

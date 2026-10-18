@@ -22,7 +22,7 @@ from app.v0.schemas import (
 from app.v0.storage import FactStore
 from app.v0.execution import Command, CommandView, ExecutionReadModel, ExecutionStore
 from app.v0.delivery import DeliveryEvidence, DeliveryStore
-from app.v0.sensitive import safe_error
+from app.v0.sensitive import safe_recorded_error
 
 
 router = APIRouter(prefix="/api/v0/runs", tags=["v0-runs"])
@@ -82,7 +82,7 @@ class MissionReviewInput(BaseModel):
 
 class QualityReviewInput(BaseModel):
     action: Literal["retry", "accept"]
-    quality_ref: ArtifactRef
+    quality_ref: ArtifactRef | None = None
     lesson_ref: ArtifactRef
     expected_checkpoint_id: str = Field(min_length=1)
     reason: str | None = Field(default=None, max_length=2000)
@@ -91,6 +91,8 @@ class QualityReviewInput(BaseModel):
     def validate_reason(self) -> "QualityReviewInput":
         if self.action == "accept" and not (self.reason or "").strip():
             raise ValueError("接受 Quality 风险必须填写说明")
+        if self.action == "accept" and self.quality_ref is None:
+            raise ValueError("接受 Quality 风险必须绑定 Quality Artifact")
         if self.action == "retry" and self.reason is not None:
             raise ValueError("重新检查 Quality 不接受说明")
         return self
@@ -105,7 +107,7 @@ def _public_run(run: V0Run) -> V0Run:
         stage.input_summary = "已隐藏" if stage.input_summary else ""
         stage.output_summary = "已隐藏" if stage.output_summary else ""
         if stage.failure_reason:
-            stage.failure_reason = safe_error(RuntimeError(stage.failure_reason))
+            stage.failure_reason = safe_recorded_error(stage.failure_reason)
     if visible.release_decision:
         visible.release_decision.reason = "已隐藏"
     return visible
@@ -207,7 +209,9 @@ def review_quality(
     run_id: str, review: QualityReviewInput,
     runner: RunnerDep, idempotency_key: IdempotencyKey,
 ) -> Command:
-    if review.quality_ref.run_id != run_id or review.lesson_ref.run_id != run_id:
+    if (review.quality_ref is not None and review.quality_ref.run_id != run_id) or (
+        review.lesson_ref.run_id != run_id
+    ):
         raise HTTPException(status_code=409, detail="Quality 审批引用与 Run 不一致")
     return _accept_command(
         run_id, "QUALITY_REVIEW", review.model_dump(exclude_none=True),

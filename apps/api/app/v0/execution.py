@@ -15,7 +15,12 @@ from app.v0.schemas import (
     GraphState,
     LessonDraft,
 )
-from app.v0.sensitive import safe_error, safe_waiting_reason
+from app.v0.sensitive import (
+    HIDDEN_PROVIDER_ERROR,
+    is_reviewer_schema_error,
+    safe_recorded_error,
+    safe_waiting_reason,
+)
 from app.v0.budget import BudgetStore, BudgetSummary, TokenLimitReached
 
 CommandKind = Literal[
@@ -66,8 +71,8 @@ class MissionReviewView(BaseModel):
 
 
 class QualityReviewView(BaseModel):
-    status: Literal["pending"]
-    quality_ref: ArtifactRef
+    status: Literal["pending", "retry_only"]
+    quality_ref: ArtifactRef | None = None
     lesson_ref: ArtifactRef
     checkpoint_id: str
 
@@ -232,6 +237,28 @@ class ExecutionStore:
         if row is None:
             raise PermissionError("lease 已失效，禁止提交")
 
+    @staticmethod
+    def _retryable_reviewer_failure(connection, run, checkpoint, state: GraphState) -> bool:
+        if not (
+            run.status == "failed" and run.stages[5].status == "failed"
+            and checkpoint is not None and checkpoint["position"] == "after_node"
+            and state.current_node == "quality" and state.last_outcome == "failed"
+            and run.blueprint is not None
+            and state.quality_cursor < len(run.blueprint.lessons)
+        ):
+            return False
+        reason = run.stages[5].failure_reason or ""
+        if not (is_reviewer_schema_error(reason) or reason == HIDDEN_PROVIDER_ERROR):
+            return False
+        # Older runs stored only the generic safe error. A successful Reviewer
+        # response in this failed node is the narrow recoverable legacy signal.
+        call = connection.execute(
+            "SELECT role, status FROM provider_calls WHERE run_id=? "
+            "AND node_execution_id=? ORDER BY started_at DESC, rowid DESC LIMIT 1",
+            (run.id, checkpoint["node_execution_id"]),
+        ).fetchone()
+        return bool(call and call["role"] == "reviewer" and call["status"] == "SUCCEEDED")
+
     def heartbeat(
         self, run_id: str, owner: str, epoch: int,
         *, command_id: str | None = None, ttl_seconds: int = 60,
@@ -391,7 +418,11 @@ class ExecutionStore:
         if action == "retry" and reason is not None:
             raise ValueError("Quality 重新检查不接受说明")
         try:
-            quality_ref = ArtifactRef.model_validate(command.payload["quality_ref"])
+            raw_quality_ref = command.payload.get("quality_ref")
+            quality_ref = (
+                ArtifactRef.model_validate(raw_quality_ref)
+                if raw_quality_ref is not None else None
+            )
             lesson_ref = ArtifactRef.model_validate(command.payload["lesson_ref"])
             expected = command.payload["expected_checkpoint_id"]
         except (KeyError, TypeError, ValueError) as error:
@@ -416,10 +447,6 @@ class ExecutionStore:
             if replay:
                 return {**dict(replay), "replayed": True}
             run = self.facts._get_run(connection, command.run_id)
-            if run.status != "waiting_for_human" or (
-                run.stages[5].status != "waiting_for_human"
-            ):
-                raise ValueError("Run 未等待 Quality 人工处理")
             checkpoint = connection.execute(
                 "SELECT id, node_execution_id, position, state_json FROM checkpoints "
                 "WHERE run_id=? "
@@ -432,21 +459,31 @@ class ExecutionStore:
             ):
                 raise ValueError("Quality 审批 checkpoint 已过期")
             state = GraphState.model_validate_json(checkpoint["state_json"])
+            technical_retry = self._retryable_reviewer_failure(
+                connection, run, checkpoint, state
+            )
+            if technical_retry:
+                if action != "retry" or quality_ref is not None:
+                    raise ValueError("Reviewer 格式失败只能重新检查当前章节")
+            elif run.status != "waiting_for_human" or (
+                run.stages[5].status != "waiting_for_human"
+            ):
+                raise ValueError("Run 未等待 Quality 人工处理")
             if state.current_node not in ("quality", "verification"):
                 raise ValueError("当前等待节点不支持 Quality 审批")
-            quality = connection.execute(
-                "SELECT artifact_id, version, content_hash FROM artifacts "
-                "WHERE run_id=? AND kind='quality' AND artifact_id=? AND version=?",
-                (command.run_id, quality_ref.artifact_id, quality_ref.version),
-            ).fetchone()
-            if (
-                quality_ref.run_id != command.run_id or quality_ref.kind != "quality"
-                or state.artifact_refs.get("quality") != quality_ref
-                or quality is None or quality["artifact_id"] != quality_ref.artifact_id
-                or quality["version"] != quality_ref.version
-                or quality["content_hash"] != quality_ref.content_hash
-            ):
-                raise ValueError("Quality 审批 Artifact 引用已过期")
+            if not technical_retry:
+                quality = connection.execute(
+                    "SELECT artifact_id, version, content_hash FROM artifacts "
+                    "WHERE run_id=? AND kind='quality' AND artifact_id=? AND version=?",
+                    (command.run_id, quality_ref.artifact_id, quality_ref.version),
+                ).fetchone() if quality_ref is not None else None
+                if (
+                    quality_ref is None or quality_ref.run_id != command.run_id
+                    or quality_ref.kind != "quality"
+                    or state.artifact_refs.get("quality") != quality_ref
+                    or quality is None or quality["content_hash"] != quality_ref.content_hash
+                ):
+                    raise ValueError("Quality 审批 Artifact 引用已过期")
             if lesson_ref.run_id != command.run_id or lesson_ref.kind != "lesson":
                 raise ValueError("Quality 审批 Lesson 引用无效")
             if run.blueprint is None or state.quality_cursor >= len(run.blueprint.lessons):
@@ -458,6 +495,14 @@ class ExecutionStore:
             )
             if current_lesson != lesson_ref:
                 raise ValueError("Quality 审批 Lesson 引用已过期")
+            lesson = connection.execute(
+                "SELECT 1 FROM artifacts WHERE run_id=? AND kind='lesson' "
+                "AND artifact_id=? AND version=? AND content_hash=?",
+                (command.run_id, lesson_ref.artifact_id,
+                 lesson_ref.version, lesson_ref.content_hash),
+            ).fetchone()
+            if lesson is None:
+                raise ValueError("Quality 审批 Lesson 引用无效")
             if action == "accept" and state.current_node == "verification":
                 candidate = connection.execute(
                     "SELECT content_json, producer_role FROM artifacts WHERE run_id=? "
@@ -496,11 +541,20 @@ class ExecutionStore:
                 (
                     command.run_id, event_type,
                     reason.strip() if isinstance(reason, str) else None,
-                    quality_ref.artifact_id, quality_ref.version, command.id,
+                    quality_ref.artifact_id if quality_ref else None,
+                    quality_ref.version if quality_ref else None, command.id,
                     command_hash(command.kind, command.payload), now,
                 ),
             ).lastrowid
             run.revision = event_id
+            if technical_retry:
+                retry_state = state.model_copy(update={
+                    "last_outcome": "waiting_for_human",
+                    "exit_reason": "reviewer_output_retry_requested",
+                })
+                self._checkpoint(
+                    connection, command.run_id, None, "after_node", retry_state, event_id,
+                )
             if action == "accept" and state.current_node == "verification":
                 refs = dict(state.artifact_refs)
                 refs[f"lesson:{lesson_id}"] = lesson_ref
@@ -781,17 +835,21 @@ class ExecutionStore:
                         checkpoint_id=(checkpoint["id"] if checkpoint and not approved else None),
                     )
         quality_review = None
-        if (
-            run.status == "waiting_for_human"
-            and run.stages[5].status == "waiting_for_human"
-            and checkpoint is not None
-            and checkpoint["position"] == "after_node"
-        ):
+        if checkpoint is not None and checkpoint["position"] == "after_node":
             state = GraphState.model_validate_json(checkpoint["state_json"])
+            with self.facts.connect() as connection:
+                technical_retry = self._retryable_reviewer_failure(
+                    connection, run, checkpoint, state
+                )
+            manual_review = (
+                run.status == "waiting_for_human"
+                and run.stages[5].status == "waiting_for_human"
+            )
             quality_ref = state.artifact_refs.get("quality")
             if (
-                state.current_node in ("quality", "verification")
-                and quality_ref is not None
+                (technical_retry or manual_review)
+                and state.current_node in ("quality", "verification")
+                and (technical_retry or quality_ref is not None)
                 and run.blueprint is not None
                 and state.quality_cursor < len(run.blueprint.lessons)
             ):
@@ -802,8 +860,8 @@ class ExecutionStore:
                 )
                 if lesson_ref is not None:
                     quality_review = QualityReviewView(
-                        status="pending",
-                        quality_ref=quality_ref,
+                        status="retry_only" if technical_retry else "pending",
+                        quality_ref=None if technical_retry else quality_ref,
                         lesson_ref=lesson_ref,
                         checkpoint_id=checkpoint["id"],
                     )
@@ -811,7 +869,7 @@ class ExecutionStore:
             "run_id": run_id,
             "commands": [CommandView.model_validate({
                 **item.model_dump(),
-                "error": safe_error(RuntimeError(item.error)) if item.error else None,
+                "error": safe_recorded_error(item.error) if item.error else None,
             }) for item in commands],
             "current_node": node["node"] if node else None,
             "node_status": node["status"] if node else None,

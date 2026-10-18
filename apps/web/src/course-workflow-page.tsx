@@ -233,6 +233,9 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
       if (!runId || !run || !canReviewQuality(run, executionQuery.data) || !review) {
         throw new Error("Quality 人工处理状态已变化，请刷新后重试");
       }
+      if (action === "accept" && review.status === "retry_only") {
+        throw new Error("Reviewer 输出格式失败只能重新检查，不能接受为质量通过");
+      }
       const acceptedReason = action === "accept" ? qualityReason.trim() : undefined;
       if (action === "accept" && !acceptedReason) throw new Error("请填写风险接受说明");
       const digest = acceptedReason
@@ -435,16 +438,20 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
           {displayedStage?.name === "quality" && canReviewQuality(run, executionQuery.data)
             && executionQuery.data?.quality_review && <section className="result-card quality-review-panel">
               <h2>Quality 人工处理</h2>
-              <p>当前证据：quality v{executionQuery.data.quality_review.quality_ref.version}；
-                Lesson v{executionQuery.data.quality_review.lesson_ref.version}。</p>
+              {executionQuery.data.quality_review.status === "retry_only"
+                ? <p>Reviewer 输出格式校验失败。可显式重新检查当前章节；此前人工接受的风险不会被撤销。</p>
+                : <p>当前证据：quality v{executionQuery.data.quality_review.quality_ref?.version}；
+                    Lesson v{executionQuery.data.quality_review.lesson_ref.version}。</p>}
               <button disabled={busy} onClick={() => qualityReviewMutation.mutate("retry")}>
                 重新检查
               </button>
-              <label>风险接受说明
-                <textarea value={qualityReason} onChange={(event) => setQualityReason(event.target.value)} />
-              </label>
-              <button disabled={busy || !qualityReason.trim()}
-                onClick={() => qualityReviewMutation.mutate("accept")}>接受风险并继续</button>
+              {executionQuery.data.quality_review.status === "pending" && <>
+                <label>风险接受说明
+                  <textarea value={qualityReason} onChange={(event) => setQualityReason(event.target.value)} />
+                </label>
+                <button disabled={busy || !qualityReason.trim()}
+                  onClick={() => qualityReviewMutation.mutate("accept")}>接受风险并继续</button>
+              </>}
             </section>}
           {displayedStage?.name === "release" && canDecideRelease(run) && (
             <section className="release-panel" id="release-actions">

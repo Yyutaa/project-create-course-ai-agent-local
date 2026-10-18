@@ -10,6 +10,8 @@ from app.v0.schemas import QualitySummary
 from app.v0.storage import FactStore
 from app.v0.provider import FakeProvider
 from app.v0.provider import AgentResponse
+from app.v0.provider import ProviderError
+from app.v0.sensitive import safe_error
 from app.v0.worker import Worker
 
 
@@ -527,6 +529,138 @@ def test_quality_review_retry_rechecks_the_same_lesson(stores):
             (run_id,),
         ).fetchone()[0]
     assert count == 1
+
+
+def test_reviewer_schema_failure_requires_explicit_retry_without_risk_acceptance(stores):
+    facts, commands, run_id = stores
+
+    class MalformedOnce(FakeProvider):
+        def __init__(self):
+            super().__init__()
+            self.malformed = True
+
+        def invoke(self, request):
+            if request.role == "reviewer" and self.malformed:
+                self.malformed = False
+                return AgentResponse(role="reviewer", payload={"status": "wrong"})
+            return super().invoke(request)
+
+    commands.accept(run_id, "START", {}, "start-1")
+    worker = Worker(facts.path, provider=MalformedOnce(), owner="worker-a")
+    worker.run_once()
+    failed = facts.get_run(run_id)
+    assert failed.status == "failed"
+    assert failed.stages[5].status == "failed"
+    # Existing failed Runs predate the allowlisted Reviewer error and have only
+    # the generic persisted message, like the reported Run.
+    failed.stages[5].failure_reason = (
+        "ProviderError：细节已隐藏，请检查受限诊断信息"
+    )
+    with facts.connect() as connection:
+        connection.execute(
+            "UPDATE snapshots SET projection_json=? WHERE run_id=?",
+            (failed.model_dump_json(), run_id),
+        )
+    review = commands.read_model(run_id).quality_review
+    assert review is not None and review.status == "retry_only"
+    assert review.quality_ref is None
+
+    commands.accept(run_id, "QUALITY_REVIEW", {
+        "action": "accept", "lesson_ref": review.lesson_ref.model_dump(mode="json"),
+        "expected_checkpoint_id": review.checkpoint_id,
+        "reason": "不能把格式错误当成质量通过",
+    }, "invalid-accept")
+    worker.run_once()
+    assert commands.list_commands(run_id)[-1].status == "REJECTED"
+    assert facts.get_run(run_id).status == "failed"
+
+    commands.accept(run_id, "QUALITY_REVIEW", {
+        "action": "retry", "lesson_ref": review.lesson_ref.model_dump(mode="json"),
+        "expected_checkpoint_id": review.checkpoint_id,
+    }, "explicit-retry")
+    worker.run_once()
+    result = facts.get_run(run_id)
+    assert commands.list_commands(run_id)[-1].status == "APPLIED"
+    assert result.stages[5].status == "succeeded"
+    assert result.stages[6].status == "waiting_for_human"
+    with facts.connect() as connection:
+        risk_count = connection.execute(
+            "SELECT COUNT(*) FROM events WHERE run_id=? AND type='quality.risk_accepted'",
+            (run_id,),
+        ).fetchone()[0]
+        retry_count = connection.execute(
+            "SELECT COUNT(*) FROM events WHERE run_id=? AND type='quality.retry_requested'",
+            (run_id,),
+        ).fetchone()[0]
+    assert risk_count == 0
+    assert retry_count == 1
+
+
+def test_reviewer_gate_schema_error_exposes_only_field_path_and_type():
+    detail = "reviewer rubric 输出校验失败：status (literal_error)"
+    assert safe_error(ProviderError(detail)) == detail
+    assert "SECRET" not in safe_error(
+        ProviderError("reviewer rubric 输出校验失败：SECRET (literal_error)")
+    )
+
+
+def test_reviewer_retry_after_previous_lesson_risk_acceptance(stores):
+    facts, commands, run_id = stores
+
+    class TwoLessons(FakeProvider):
+        def __init__(self):
+            super().__init__()
+            self.reviewer_calls = 0
+
+        def invoke(self, request):
+            if request.role == "blueprint":
+                return AgentResponse(role="blueprint", payload={"lessons": [
+                    {"title": f"章节 {number}", "learning_goal": f"掌握 {number}",
+                     "evidence": f"练习 {number}"}
+                    for number in (1, 2)
+                ]})
+            if request.role == "reviewer":
+                self.reviewer_calls += 1
+                if self.reviewer_calls == 1:
+                    return AgentResponse(role="reviewer", payload=QualitySummary(
+                        status="manual_review", checks=["需人工核对"],
+                        language_risk="需人工复读", limitations=["事实未核验"],
+                    ).model_dump())
+                if self.reviewer_calls == 2:
+                    return AgentResponse(role="reviewer", payload={"status": "wrong"})
+            return super().invoke(request)
+
+    commands.accept(run_id, "START", {}, "start-1")
+    worker = Worker(facts.path, provider=TwoLessons(), owner="worker-a")
+    worker.run_once()
+    first_review = commands.read_model(run_id).quality_review
+    assert first_review is not None and first_review.status == "pending"
+    commands.accept(run_id, "QUALITY_REVIEW", {
+        "action": "accept",
+        "quality_ref": first_review.quality_ref.model_dump(mode="json"),
+        "lesson_ref": first_review.lesson_ref.model_dump(mode="json"),
+        "expected_checkpoint_id": first_review.checkpoint_id,
+        "reason": "人工接受第一章的质量风险",
+    }, "first-accept")
+    worker.run_once()
+    assert facts.get_run(run_id).status == "failed"
+    retry = commands.read_model(run_id).quality_review
+    assert retry is not None and retry.status == "retry_only"
+    assert retry.lesson_ref != first_review.lesson_ref
+    commands.accept(run_id, "QUALITY_REVIEW", {
+        "action": "retry", "lesson_ref": retry.lesson_ref.model_dump(mode="json"),
+        "expected_checkpoint_id": retry.checkpoint_id,
+    }, "second-retry")
+    worker.run_once()
+    result = facts.get_run(run_id)
+    assert result.stages[5].status == "succeeded"
+    assert result.stages[6].status == "waiting_for_human"
+    with facts.connect() as connection:
+        accepted = connection.execute(
+            "SELECT COUNT(*) FROM events WHERE run_id=? AND type='quality.risk_accepted'",
+            (run_id,),
+        ).fetchone()[0]
+    assert accepted == 1
 
 
 class VerificationWithoutFindingProvider(FakeProvider):

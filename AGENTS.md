@@ -198,6 +198,12 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
   `candidate.human_accepted`，明确区分于独立验证通过的 `candidate.accepted`。决定提交后
   生成新的 Quality Artifact，并继续下一章或进入人工 release。它不等同于模型 Gate
   通过，也不得自动发布。通用 `REVISE` 文本不能替代该决定。
+- 唯一的技术失败恢复例外是 `quality=failed`、当前节点为 `quality`、最新
+  `after_node` checkpoint 为失败、该节点 Reviewer 调用已成功返回但结构化结果校验失败。
+  此时仅展示并受理精确 checkpoint 与当前 Lesson 引用的 `QUALITY_REVIEW retry`，
+  不要求尚未产生的当前 Quality Artifact，也不允许 `accept`；历史仅有泛化错误文本的
+  Run 还须由同节点成功的 Reviewer 调用事实佐证。重检是显式人工命令，保留此前
+  Quality Artifact、风险接受 Event 与返工预算，不扩展为一般业务失败自动重试。
 - 读取模型组合 Command、当前 NodeExecution、最后 checkpoint、停止请求和等待人工原因；
   Snapshot 与前端缓存都不持有执行权。正常模型调用可能在崩溃后重复，保证的是
   已提交事实的幂等与旧租约围栏，不声称 Provider 调用 exactly-once。
