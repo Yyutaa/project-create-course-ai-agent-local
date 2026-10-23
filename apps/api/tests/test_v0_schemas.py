@@ -44,7 +44,7 @@ def test_course_input_has_generation_constraint_defaults():
     assert value.expected_chapters == 12
     assert value.min_effective_chars == 12_000
     assert value.token_limit is None
-    assert value.source_policy == "允许使用用户资料与公开官方资料"
+    assert value.source_policy == "仅允许使用公开官方资料"
 
 
 def test_course_input_rejects_blank_or_overlong_source_policy():

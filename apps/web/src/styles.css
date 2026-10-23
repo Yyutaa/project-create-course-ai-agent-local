@@ -582,7 +582,9 @@ a.course-card:hover {
 .course-form textarea,
 .release-panel textarea,
 .result-card textarea,
+.result-card input,
 .config-dialog input,
+.config-dialog textarea,
 .config-dialog select {
   width: 100%;
   padding: 11px 13px;
@@ -600,10 +602,20 @@ a.course-card:hover {
   border-color: #aeb8b0;
 }
 
+.result-card input:hover {
+  border-color: #aeb8b0;
+}
+
 .course-form input:focus,
 .course-form textarea:focus,
 .release-panel textarea:focus,
 .result-card textarea:focus {
+  border-color: #85bd35;
+  box-shadow: 0 0 0 3px rgb(167 244 50 / 14%);
+  outline: 0;
+}
+
+.result-card input:focus {
   border-color: #85bd35;
   box-shadow: 0 0 0 3px rgb(167 244 50 / 14%);
   outline: 0;
@@ -1067,6 +1079,7 @@ button.secondary {
 
 .run-main {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   min-width: 0;
 }
@@ -1635,5 +1648,226 @@ button.secondary {
   .course-card,
   .empty-card {
     min-height: 250px;
+  }
+}
+
+.source-review-panel {
+  padding: 0;
+  overflow: hidden;
+}
+
+.source-review-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 24px 26px 18px;
+}
+
+.source-review-eyebrow,
+.source-candidate-host {
+  color: var(--muted);
+  font: 700 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .04em;
+}
+
+.source-review-heading h2 {
+  margin: 7px 0 6px;
+  font-size: 20px;
+}
+
+.source-review-heading p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.source-review-state {
+  align-self: flex-start;
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border: 1px solid #e8d8ad;
+  border-radius: 999px;
+  color: #665122;
+  background: #fbf5e7;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.source-review-panel .source-review-summary {
+  margin: 0 26px;
+  padding: 11px 14px;
+  border-left: 3px solid var(--lime-dark);
+  border-radius: 0 5px 5px 0;
+  color: #354039;
+  background: #f3f7ec;
+  line-height: 1.5;
+}
+
+.source-review-primary {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  padding: 18px 26px 24px;
+}
+
+.source-review-primary span,
+.source-review-limit {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.source-review-panel .source-review-limit {
+  margin: 0;
+  padding: 18px 26px 24px;
+}
+
+.source-review-candidates {
+  padding: 19px 26px 22px;
+  border-top: 1px solid var(--line);
+}
+
+.source-review-candidates h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
+.source-review-candidates>p {
+  margin: 0 0 14px;
+  color: var(--muted);
+}
+
+.source-candidate-list {
+  display: grid;
+  gap: 8px;
+}
+
+.source-candidate {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fbfcfa;
+}
+
+.source-candidate-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.source-candidate-copy a {
+  overflow: hidden;
+  color: #26392b;
+  font-size: 13px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-candidate-copy a:hover,
+.source-review-diagnostics a:hover {
+  text-decoration: underline;
+}
+
+.source-candidate-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 7px;
+}
+
+.source-reject-button {
+  border-color: transparent;
+  color: #5b655d;
+  background: transparent;
+}
+
+.source-reject-button:hover:not(:disabled) {
+  color: var(--danger);
+  background: #fbebe8;
+}
+
+.source-review-extra {
+  padding: 14px 26px;
+  border-top: 1px solid var(--line);
+}
+
+.source-review-extra summary {
+  width: fit-content;
+  color: #344039;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.source-review-extra[open] summary {
+  margin-bottom: 12px;
+}
+
+.source-review-extra p {
+  color: var(--muted);
+}
+
+.source-review-extra label {
+  max-width: 680px;
+}
+
+.source-review-diagnostics ul {
+  display: grid;
+  gap: 8px;
+  max-height: 240px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.source-review-diagnostics li {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  min-width: 0;
+}
+
+.source-review-diagnostics a {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-review-diagnostics li span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.source-review-panel .config-dialog textarea {
+  min-height: 90px;
+  resize: none;
+}
+
+@media (max-width: 760px) {
+  .source-review-heading,
+  .source-review-primary,
+  .source-candidate {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .source-review-heading,
+  .source-review-primary,
+  .source-review-candidates,
+  .source-review-extra {
+    padding-right: 18px;
+    padding-left: 18px;
+  }
+
+  .source-review-panel .source-review-summary {
+    margin-right: 18px;
+    margin-left: 18px;
   }
 }

@@ -19,6 +19,7 @@ from app.v0.schemas import (
     CourseProgress,
     CourseChapter,
     CourseInput,
+    DEFAULT_SOURCE_POLICY,
     GraphState,
     Publication,
     ReleaseDecision,
@@ -79,25 +80,32 @@ class FactStore:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version >= 11:
+            if version >= 12:
+                return
+            if version == 11:
+                self._migrate_v12(connection)
                 return
             if version == 10:
                 self._migrate_v11(connection)
+                self._migrate_v12(connection)
                 return
             if version == 9:
                 self._migrate_v10(connection)
                 self._migrate_v11(connection)
+                self._migrate_v12(connection)
                 return
             if version == 8:
                 self._migrate_v9(connection)
                 self._migrate_v10(connection)
                 self._migrate_v11(connection)
+                self._migrate_v12(connection)
                 return
             if version == 7:
                 self._migrate_v8(connection)
                 self._migrate_v9(connection)
                 self._migrate_v10(connection)
                 self._migrate_v11(connection)
+                self._migrate_v12(connection)
                 return
             if version == 6:
                 self._migrate_v7(connection)
@@ -105,6 +113,7 @@ class FactStore:
                 self._migrate_v9(connection)
                 self._migrate_v10(connection)
                 self._migrate_v11(connection)
+                self._migrate_v12(connection)
                 return
             if version == 5:
                 self._migrate_v6(connection)
@@ -113,6 +122,7 @@ class FactStore:
                 self._migrate_v9(connection)
                 self._migrate_v10(connection)
                 self._migrate_v11(connection)
+                self._migrate_v12(connection)
                 return
             if version == 4:
                 self._migrate_v5(connection)
@@ -122,6 +132,7 @@ class FactStore:
                 self._migrate_v9(connection)
                 self._migrate_v10(connection)
                 self._migrate_v11(connection)
+                self._migrate_v12(connection)
                 return
             if version == 3:
                 self._migrate_v4(connection)
@@ -132,6 +143,7 @@ class FactStore:
                 self._migrate_v9(connection)
                 self._migrate_v10(connection)
                 self._migrate_v11(connection)
+                self._migrate_v12(connection)
                 return
             if version == 0:
                 connection.execute(
@@ -228,6 +240,7 @@ class FactStore:
             self._migrate_v9(connection)
             self._migrate_v10(connection)
             self._migrate_v11(connection)
+            self._migrate_v12(connection)
 
     @staticmethod
     def _migrate_v4(connection: sqlite3.Connection) -> None:
@@ -391,6 +404,84 @@ class FactStore:
                 )
         connection.execute("PRAGMA user_version=11")
 
+    @staticmethod
+    def _migrate_v12(connection: sqlite3.Connection) -> None:
+        has_runs = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'"
+        ).fetchone()
+        if has_runs:
+            columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(runs)")
+            }
+            if "source_evidence_version" not in columns:
+                connection.execute(
+                    "ALTER TABLE runs ADD COLUMN source_evidence_version "
+                    "INTEGER NOT NULL DEFAULT 0 "
+                    "CHECK(source_evidence_version IN (0, 1))"
+                )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS tool_invocations ("
+            "id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), "
+            "node_execution_id TEXT, command_id TEXT, tool_id TEXT NOT NULL, "
+            "args_hash TEXT NOT NULL, status TEXT NOT NULL, result_json TEXT, "
+            "error_code TEXT, lease_epoch INTEGER NOT NULL, "
+            "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS tool_calls_by_run "
+            "ON tool_invocations(run_id, tool_id, args_hash, status)"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS source_candidates ("
+            "id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), "
+            "search_call_id TEXT REFERENCES tool_invocations(id), "
+            "url TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL, "
+            "metadata_hash TEXT NOT NULL, created_at TEXT NOT NULL, "
+            "UNIQUE(run_id, url))"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS source_documents ("
+            "id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), "
+            "candidate_id TEXT NOT NULL REFERENCES source_candidates(id), "
+            "version INTEGER NOT NULL, url TEXT NOT NULL, title TEXT NOT NULL, "
+            "content TEXT NOT NULL, content_hash TEXT NOT NULL, "
+            "identity_json TEXT NOT NULL, status TEXT NOT NULL, "
+            "created_at TEXT NOT NULL, UNIQUE(candidate_id, version))"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS source_claim_links ("
+            "id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), "
+            "lesson_artifact_id TEXT NOT NULL, lesson_version INTEGER NOT NULL, "
+            "lesson_hash TEXT NOT NULL, line_number INTEGER NOT NULL, "
+            "claim_hash TEXT NOT NULL, document_id TEXT REFERENCES source_documents(id), "
+            "document_hash TEXT, excerpt_hash TEXT, status TEXT NOT NULL, "
+            "created_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS source_decisions ("
+            "id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), "
+            "candidate_id TEXT REFERENCES source_candidates(id), "
+            "checkpoint_id TEXT NOT NULL, action TEXT NOT NULL, "
+            "reason TEXT NOT NULL, command_id TEXT NOT NULL UNIQUE, "
+            "created_at TEXT NOT NULL)"
+        )
+        if has_runs:
+            for table in (
+                "tool_invocations", "source_candidates", "source_documents",
+                "source_claim_links", "source_decisions",
+            ):
+                for operation, row in (
+                    ("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD"),
+                ):
+                    connection.execute(
+                        f"CREATE TRIGGER IF NOT EXISTS {table}_stream_{operation.lower()} "
+                        f"AFTER {operation} ON {table} BEGIN "
+                        "INSERT INTO run_change_seq(run_id, seq) "
+                        f"VALUES ({row}.run_id, 1) "
+                        "ON CONFLICT(run_id) DO UPDATE SET seq=seq+1; END"
+                    )
+        connection.execute("PRAGMA user_version=12")
+
     def mission_review_required(self, run_id: str) -> bool:
         with self.connect() as connection:
             row = connection.execute(
@@ -414,6 +505,9 @@ class FactStore:
                     raise ValueError("Idempotency-Key 已用于不同课程输入")
                 return self._get_run(connection, existing["id"]), False
 
+            if course_input.source_policy != DEFAULT_SOURCE_POLICY:
+                raise ValueError(f"新建课程仅允许使用来源政策：{DEFAULT_SOURCE_POLICY}")
+
             course_id, run_id, now = uuid4().hex, uuid4().hex, _now()
             workspace = self.workspace.course_dir(course_id)
             workspace.mkdir(parents=True, exist_ok=False)
@@ -422,6 +516,7 @@ class FactStore:
                 course_id=course_id,
                 course_input=course_input,
                 constraints_version=1,
+                source_evidence_version=1,
             )
             try:
                 connection.execute(
@@ -431,7 +526,8 @@ class FactStore:
                 connection.execute(
                     "INSERT INTO runs(id, course_id, status, idempotency_key, "
                     "request_hash, created_at, updated_at, mission_review_required, "
-                    "constraints_version) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1)",
+                    "constraints_version, source_evidence_version) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, 1)",
                     (run_id, course_id, "running", request_key, request_hash, now, now),
                 )
                 connection.execute(
@@ -520,7 +616,8 @@ class FactStore:
 
     def _rebuild(self, connection: sqlite3.Connection, run_id: str) -> V0Run:
         row = connection.execute(
-            "SELECT runs.course_id, runs.constraints_version, intakes.topic, "
+            "SELECT runs.course_id, runs.constraints_version, "
+            "runs.source_evidence_version, intakes.topic, "
             "intakes.audience, intakes.goal, intakes.language, intakes.source_policy, "
             "intakes.expected_chapters, intakes.min_effective_chars, "
             "intakes.token_limit FROM runs JOIN intakes ON intakes.run_id=runs.id "
@@ -549,6 +646,7 @@ class FactStore:
             course_id=row["course_id"],
             course_input=course,
             constraints_version=row["constraints_version"],
+            source_evidence_version=row["source_evidence_version"],
         )
         events = connection.execute(
             "SELECT * FROM events WHERE run_id=? ORDER BY id", (run_id,)
@@ -636,6 +734,10 @@ class FactStore:
                 run.status = "running"
                 run.stages[5].status = "pending"
                 run.stages[5].failure_reason = None
+            elif kind in ("source.approve", "source.reject") and stage:
+                run.status = "running"
+                stage.status = "pending"
+                stage.failure_reason = None
             run.revision = event["id"]
         return run
 

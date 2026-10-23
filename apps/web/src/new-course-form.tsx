@@ -1,28 +1,13 @@
 import { useState } from "react";
 import { CourseInput } from "./api";
 
-const DEFAULT_SOURCE_POLICY = "允许使用用户资料与公开官方资料";
+const DEFAULT_SOURCE_POLICY = "仅允许使用公开官方资料";
 
 const sourcePolicies = [
   {
-    value: "允许使用用户资料与公开官方资料",
-    label: "用户资料 + 官方资料",
-    description: "优先使用你提供的材料，并允许官方文档、标准和论文补足事实。",
-  },
-  {
-    value: "仅限使用内部提供材料",
-    label: "仅内部资料",
-    description: "不从公开网络补充知识；证据不足时缩小断言或暂停确认。",
-  },
-  {
     value: "仅允许使用公开官方资料",
     label: "仅公开官方资料",
-    description: "只使用官方文档、标准、论文及权威机构的一手材料。",
-  },
-  {
-    value: "允许使用用户资料、公开官方资料与经交叉核验的高质量社区资料",
-    label: "扩展资料并交叉核验",
-    description: "社区材料可用于案例和经验，关键事实仍需官方或一手来源确认。",
+    description: "模型可检索公开资料；只有核验为官方或一手材料后，才能作为事实依据。",
   },
 ];
 
@@ -121,7 +106,7 @@ export function NewCourseForm({ onStart, creationAction }: {
                       </label>
                     ))}
                   </div>
-                  <small>当前为约束口径，V0 不执行联网检索；政策决定模型可用的事实来源边界。</small>
+                  <small>其他来源政策暂不开放。证据不足时课程会暂停，等待人工处理。</small>
                 </div>
               </fieldset>
             </div>

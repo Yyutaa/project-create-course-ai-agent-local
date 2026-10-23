@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, CourseInput, LlmConfigStatus, StageRecord } from "./api";
@@ -8,7 +8,7 @@ import {
   canResumeRun, canStartRun, canDecideRelease, canPublish,
   canReviewMission, canReviewQuality, courseCreationAction,
   continuityLedgerLabels, pollInterval,
-  runPath, shouldPoll, stageDisplayName,
+  runPath, shouldPoll, sourceReviewSummary, stageDisplayName,
 } from "./run-view";
 import { subscribeRun } from "./run-stream";
 import { LlmConfigDialog } from "./llm-config-dialog";
@@ -42,6 +42,12 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
   const [revisionText, setRevisionText] = useState("");
   const [missionFeedback, setMissionFeedback] = useState("");
   const [qualityReason, setQualityReason] = useState("");
+  const [sourceReason, setSourceReason] = useState("");
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [sourceDecision, setSourceDecision] = useState<{
+    action: "approve" | "reject"; id: string; metadataHash: string; url: string;
+  } | null>(null);
+  const sourceDecisionDialog = useRef<HTMLDialogElement>(null);
   const [motionPaused, setMotionPaused] = useState(false);
   const [streamConnected, setStreamConnected] = useState(false);
   const [selectedStage, setSelectedStage] = useState<StageRecord["name"] | null>(null);
@@ -101,13 +107,19 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
     enabled: Boolean(runId),
     refetchInterval: pollInterval(run, streamConnected),
   });
+  const sourcesQuery = useQuery({
+    queryKey: ["sources", runId],
+    queryFn: () => api.sources(runId!),
+    enabled: Boolean(runId && run?.source_evidence_version),
+    refetchInterval: run?.status === "running" ? (streamConnected ? 30_000 : 5000) : false,
+  });
   useEffect(() => {
     if (!runId || !run || !shouldPoll(run.status)) {
       setStreamConnected(false);
       return;
     }
     const refresh = () => {
-      for (const key of ["run", "execution", "run-content", "evidence", "events"]) {
+      for (const key of ["run", "execution", "run-content", "evidence", "events", "sources"]) {
         void queryClient.invalidateQueries({ queryKey: [key, runId] });
       }
     };
@@ -266,8 +278,48 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
       void queryClient.invalidateQueries({ queryKey: ["evidence", command.run_id] });
     },
   });
-  const busy = startMutation.isPending || releaseMutation.isPending || publishMutation.isPending || controlMutation.isPending || budgetMutation.isPending || missionReviewMutation.isPending || qualityReviewMutation.isPending;
-  const error = startMutation.error || releaseMutation.error || publishMutation.error || controlMutation.error || budgetMutation.error || missionReviewMutation.error || qualityReviewMutation.error || runQuery.error || contentQuery.error || executionQuery.error || evidenceQuery.error;
+  const sourceReviewMutation = useMutation({
+    mutationFn: async ({ action, candidateId, metadataHash }: {
+      action: "approve" | "reject" | "propose_url" | "retry_search";
+      candidateId?: string; metadataHash?: string;
+    }) => {
+      const review = executionQuery.data?.source_review;
+      if (!runId || !review || review.checkpoint_id !== executionQuery.data?.checkpoint?.id) {
+        throw new Error("来源复核状态已变化，请刷新后重试");
+      }
+      const reason = sourceReason.trim();
+      if (action === "approve" && !reason) throw new Error("请填写官方归属的判断依据");
+      const url = action === "propose_url" ? sourceUrl.trim() : undefined;
+      if (action === "propose_url" && !url) throw new Error("请填写公开官方资料地址");
+      const payload = {
+        action, expected_checkpoint_id: review.checkpoint_id,
+        ...(action === "approve" ? { reason } : {}),
+        ...(url ? { url } : {}),
+        ...(candidateId ? { candidate_id: candidateId, metadata_hash: metadataHash } : {}),
+      };
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(
+        JSON.stringify(payload),
+      ));
+      const fingerprint = Array.from(new Uint8Array(digest), (byte) =>
+        byte.toString(16).padStart(2, "0")).join("");
+      const slot = `source-review:${runId}`;
+      const key = pendingKey(sessionStorage, slot, fingerprint);
+      return api.reviewSource(runId, payload, key);
+    },
+    onSuccess: (command) => {
+      clearPendingKey(sessionStorage, `source-review:${command.run_id}`);
+      setSourceReason("");
+      setSourceUrl("");
+      for (const key of ["execution", "run", "snapshot", "evidence", "sources"]) {
+        void queryClient.invalidateQueries({ queryKey: [key, command.run_id] });
+      }
+    },
+  });
+  const busy = startMutation.isPending || releaseMutation.isPending || publishMutation.isPending || controlMutation.isPending || budgetMutation.isPending || missionReviewMutation.isPending || qualityReviewMutation.isPending || sourceReviewMutation.isPending;
+  const error = startMutation.error || releaseMutation.error || publishMutation.error || controlMutation.error || budgetMutation.error || missionReviewMutation.error || qualityReviewMutation.error || sourceReviewMutation.error || runQuery.error || contentQuery.error || executionQuery.error || evidenceQuery.error || sourcesQuery.error;
+  const sourceReviewCompatible = Boolean(executionQuery.data?.source_review
+    && Number.isInteger(executionQuery.data.source_review.hidden_candidate_count)
+    && Number.isInteger(executionQuery.data.source_review.retry_remaining));
   const chapterDeviation = run?.stages.some(
     (stage) => stage.failure_reason === "blueprint_chapter_deviation",
   ) ?? false;
@@ -380,7 +432,8 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
             {run.status === "running" && <button disabled={busy} onClick={() => controlMutation.mutate("STOP")}>请求停止</button>}
             {canResumeRun(run, executionQuery.data) && (run.status === "stopped" || (run.status === "waiting_for_human" && !canDecideRelease(run)
               && executionQuery.data?.mission_review?.status !== "pending"
-              && executionQuery.data?.quality_review?.status !== "pending")) && executionQuery.data?.checkpoint && (
+              && executionQuery.data?.quality_review?.status !== "pending"
+              && !executionQuery.data?.source_review)) && executionQuery.data?.checkpoint && (
               <div>
                 <label>人工修订说明
                   <textarea value={revisionText} onChange={(event) => setRevisionText(event.target.value)} />
@@ -429,6 +482,114 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
                 <button disabled={busy || !missionFeedback.trim()} onClick={() => missionReviewMutation.mutate("revise")}>要求修改</button>
               </div>
             </section>}
+          {executionQuery.data?.source_review && !sourceReviewCompatible &&
+            <section className="result-card" aria-label="来源人工复核">
+              <h2>来源复核暂不可用</h2>
+              <p role="alert">{sourceReviewSummary(executionQuery.data.source_review)}</p>
+            </section>}
+          {sourceReviewCompatible && executionQuery.data?.source_review && <section className="result-card source-review-panel" aria-label="来源人工复核">
+            <div className="source-review-heading">
+              <div>
+                <span className="source-review-eyebrow">来源核验暂停</span>
+                <h2>先让系统继续查找</h2>
+                <p>目前没有足够的官方资料支撑课程。你无需逐条审核搜索结果。</p>
+              </div>
+              <span className="source-review-state">证据不足</span>
+            </div>
+            <p className="source-review-summary" role="status">
+              {sourceReviewSummary(executionQuery.data.source_review)}
+              {(sourcesQuery.data?.documents.length ?? 0) > 0 &&
+                `；已有 ${sourcesQuery.data?.documents.length} 份来源文档`}
+            </p>
+            {sourcesQuery.isError && <p role="alert">来源记录读取失败，请刷新后重试。</p>}
+            {executionQuery.data.source_review.retry_remaining > 0 ?
+              <div className="source-review-primary">
+                <button className="primary-action" disabled={busy}
+                  onClick={() => sourceReviewMutation.mutate({ action: "retry_search" })}>
+                  继续自动查找官方资料
+                </button>
+                <span>本 Run 还可重试 {executionQuery.data.source_review.retry_remaining} 次；仍受模型与工具预算约束。</span>
+              </div>
+              : <p className="source-review-limit">自动查找次数已用尽。若你知道官方文档地址，可在下方补充；否则保持暂停。</p>}
+            {executionQuery.data.source_review.candidates.length > 0 && <div className="source-review-candidates">
+              <h3>仍需你判断的来源</h3>
+              <p>只确认网站的官方归属；课程中的具体事实会另行核验。</p>
+              <div className="source-candidate-list">
+                {executionQuery.data.source_review.candidates.map((candidate) =>
+                  <article className="source-candidate" key={candidate.id}>
+                    <div className="source-candidate-copy">
+                      <span className="source-candidate-host">{new URL(candidate.url).hostname}</span>
+                      <a href={candidate.url} target="_blank" rel="noopener noreferrer">
+                        {candidate.title || candidate.url}
+                      </a>
+                    </div>
+                    <div className="source-candidate-actions">
+                      <button className="secondary" disabled={busy}
+                        onClick={() => {
+                          setSourceDecision({ action: "approve", id: candidate.id,
+                            metadataHash: candidate.metadata_hash, url: candidate.url });
+                          sourceDecisionDialog.current?.showModal();
+                        }}>核对并确认</button>
+                      <button className="source-reject-button" disabled={busy}
+                        onClick={() => {
+                          setSourceDecision({ action: "reject", id: candidate.id,
+                            metadataHash: candidate.metadata_hash, url: candidate.url });
+                          sourceDecisionDialog.current?.showModal();
+                        }}>排除</button>
+                    </div>
+                  </article>) }
+              </div>
+            </div>}
+            <details className="source-review-extra">
+              <summary>我有官方文档地址</summary>
+              <p>仅作为候选提交，系统不会直接把它当成已核验来源。</p>
+              <label>公开官方资料地址
+                <input type="url" value={sourceUrl} placeholder="https://官方文档站点/…"
+                  onChange={(event) => setSourceUrl(event.target.value)} />
+              </label>
+              <button className="secondary" disabled={busy || !sourceUrl.trim()}
+                onClick={() => sourceReviewMutation.mutate({ action: "propose_url" })}>添加候选地址</button>
+            </details>
+            {(sourcesQuery.data?.candidates.length ?? 0) > 0 &&
+              <details className="source-review-extra source-review-diagnostics">
+                <summary>查看全部检索记录（{sourcesQuery.data?.candidates.length}）</summary>
+                <ul>{sourcesQuery.data?.candidates.map((candidate) =>
+                  <li key={candidate.id}>
+                    <a href={candidate.url} target="_blank" rel="noopener noreferrer">
+                      {candidate.title || candidate.url}
+                    </a>
+                    <span>{candidate.status === "candidate" ? "仅为检索结果"
+                      : candidate.status === "needs_human" ? "归属待判断"
+                        : candidate.status === "rejected" ? "已排除" : "已处理"}</span>
+                  </li>)}</ul>
+              </details>}
+            <dialog ref={sourceDecisionDialog} className="config-dialog"
+              aria-labelledby="source-decision-title" onClose={() => setSourceDecision(null)}>
+              <h3 id="source-decision-title">
+                {sourceDecision?.action === "approve" ? "确认官方来源身份" : "拒绝来源候选"}
+              </h3>
+              <p>{sourceDecision?.url}</p>
+              <p>{sourceDecision?.action === "approve"
+                ? "这只确认该地址的官方归属，不会把课程事实自动标为已核验。"
+                : "拒绝后，此候选不能再用于当前 Run 的来源核验。"}</p>
+              {sourceDecision?.action === "approve" && <label>判断依据
+                <textarea value={sourceReason} maxLength={2000} style={{ resize: "none" }}
+                  onChange={(event) => setSourceReason(event.target.value)} />
+              </label>}
+              <div className="release-actions">
+                <button onClick={() => sourceDecisionDialog.current?.close()}>取消</button>
+                <button disabled={busy || !sourceDecision ||
+                  (sourceDecision.action === "approve" && !sourceReason.trim())} onClick={() => {
+                  if (!sourceDecision) return;
+                  sourceReviewMutation.mutate({
+                    action: sourceDecision.action, candidateId: sourceDecision.id,
+                    metadataHash: sourceDecision.metadataHash,
+                  });
+                  sourceDecisionDialog.current?.close();
+                }}>{sourceDecision?.action === "approve" ? "确认归属" : "确认拒绝"}</button>
+              </div>
+            </dialog>
+          </section>}
           {displayedStage?.name === "batch_plan" && run.batch_plan &&
             (run.batch_plan.continuity_ledger?.length ?? 0) > 0 && <section className="result-card">
               <h2>批次衔接记录</h2>

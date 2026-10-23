@@ -43,9 +43,11 @@ def execute_legacy(runner: V0Runner, run_id: str) -> None:
     # Existing graph tests exercise downstream routes as a pre-gate Run.
     run = runner.get(run_id)
     run.constraints_version = 0
+    run.source_evidence_version = 0
     with runner.store.connect() as connection:
         connection.execute(
-            "UPDATE runs SET mission_review_required=0, constraints_version=0 WHERE id=?",
+            "UPDATE runs SET mission_review_required=0, constraints_version=0, "
+            "source_evidence_version=0 WHERE id=?",
             (run_id,),
         )
         connection.execute(
@@ -53,6 +55,19 @@ def execute_legacy(runner: V0Runner, run_id: str) -> None:
             (run.model_dump_json(), run_id),
         )
     runner.execute(run_id)
+
+
+def disable_source_evidence(runner: V0Runner, run_id: str) -> None:
+    run = runner.get(run_id)
+    run.source_evidence_version = 0
+    with runner.store.connect() as connection:
+        connection.execute(
+            "UPDATE runs SET source_evidence_version=0 WHERE id=?", (run_id,),
+        )
+        connection.execute(
+            "UPDATE snapshots SET projection_json=? WHERE run_id=?",
+            (run.model_dump_json(), run_id),
+        )
 
 
 class MultiLessonProvider(FakeProvider):
@@ -143,6 +158,7 @@ def test_blueprint_chapter_count_allows_one_chapter_tolerance(
     provider = MultiLessonProvider(lesson_count=lesson_count)
     runner = V0Runner(provider, store=FactStore(tmp_path / "facts.sqlite3"))
     created = runner.create(COURSE, request_key=f"chapter-boundary-{lesson_count}")
+    disable_source_evidence(runner, created.id)
     with runner.store.connect() as connection:
         connection.execute(
             "UPDATE runs SET mission_review_required=0 WHERE id=?", (created.id,)
@@ -156,12 +172,28 @@ def test_blueprint_chapter_count_allows_one_chapter_tolerance(
     assert run.stages[3].status == "succeeded"
     blueprint_input = provider.blueprint_requests[0].inputs[0].content
     assert blueprint_input["generation_constraints"] == {"expected_chapters": 12}
-    assert blueprint_input["source_policy"] == "允许使用用户资料与公开官方资料"
+    assert blueprint_input["source_policy"] == "仅允许使用公开官方资料"
     assert "topic" not in blueprint_input
     assert provider.writer_requests[0].inputs[0].content == {
         "generation_constraints": {"min_effective_chars": 12_000},
-        "source_policy": "允许使用用户资料与公开官方资料",
+        "source_policy": "仅允许使用公开官方资料",
     }
+
+
+def test_new_run_without_source_runtime_waits_before_blueprint_artifact(tmp_path):
+    runner = V0Runner(FakeProvider(), store=FactStore(tmp_path / "facts.sqlite3"))
+    created = runner.create(COURSE, request_key="source-runtime-required")
+    with runner.store.connect() as connection:
+        connection.execute(
+            "UPDATE runs SET mission_review_required=0 WHERE id=?", (created.id,)
+        )
+
+    runner.execute(created.id)
+
+    run = runner.get(created.id)
+    assert run.stages[2].status == "waiting_for_human"
+    assert run.blueprint is None
+    assert run.stages[2].failure_reason == "source_evidence_insufficient"
 
 
 def test_blueprint_chapter_count_outlier_waits_before_batch_plan(tmp_path):
@@ -169,6 +201,7 @@ def test_blueprint_chapter_count_outlier_waits_before_batch_plan(tmp_path):
     store = FactStore(tmp_path / "facts.sqlite3")
     runner = V0Runner(provider, store=store)
     created = runner.create(COURSE, request_key="chapter-outlier")
+    disable_source_evidence(runner, created.id)
     with store.connect() as connection:
         connection.execute(
             "UPDATE runs SET mission_review_required=0 WHERE id=?", (created.id,)
@@ -210,6 +243,7 @@ def test_short_lesson_waits_for_human_without_auto_repair(tmp_path):
         ),
         request_key="short-lesson",
     )
+    disable_source_evidence(runner, created.id)
     with store.connect() as connection:
         connection.execute(
             "UPDATE runs SET mission_review_required=0 WHERE id=?", (created.id,)
@@ -257,6 +291,7 @@ def test_verification_character_shortage_waits_without_second_repair(tmp_path):
         ),
         request_key="short-verification-candidate",
     )
+    disable_source_evidence(runner, run.id)
     with runner.store.connect() as connection:
         connection.execute(
             "UPDATE runs SET mission_review_required=0 WHERE id=?", (run.id,)

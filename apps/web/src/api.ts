@@ -52,6 +52,7 @@ export type V0Run = {
   id: string;
   course_id: string | null;
   constraints_version: number;
+  source_evidence_version: number;
   revision: number;
   artifacts: ArtifactSummary[];
   course_input: CourseInput;
@@ -143,7 +144,7 @@ export type ReviewFinding = {
 };
 
 export type GateResult = {
-  gate: "deterministic" | "rubric" | "humanizer";
+  gate: "deterministic" | "source" | "rubric" | "humanizer";
   status: "pass" | "fail" | "error" | "not_applicable";
   rule_id: string;
   evidence: string;
@@ -199,7 +200,7 @@ export type ArtifactFact = ArtifactSummary & {
 export type ExecutionCommand = {
   id: string;
   run_id: string;
-  kind: "START" | "STOP" | "RESUME" | "REVISE" | "MISSION_REVIEW" | "QUALITY_REVIEW";
+  kind: "START" | "STOP" | "RESUME" | "REVISE" | "MISSION_REVIEW" | "QUALITY_REVIEW" | "SOURCE_REVIEW";
   status: "ACCEPTED" | "CLAIMED" | "APPLIED" | "FAILED" | "REJECTED";
   error: string | null;
 };
@@ -224,6 +225,15 @@ export type ExecutionReadModel = {
     lesson_ref: ArtifactRef;
     checkpoint_id: string;
   } | null;
+  source_review: {
+    checkpoint_id: string;
+    hidden_candidate_count: number;
+    retry_remaining: number;
+    candidates: {
+      id: string; url: string; title: string; status: string;
+      metadata_hash: string;
+    }[];
+  } | null;
   budget: {
     used: number; limit: number; warning_at: number;
     warning: boolean; requires_human: boolean; unknown: number;
@@ -233,6 +243,22 @@ export type ExecutionReadModel = {
   };
 };
 
+export type SourceReadModel = {
+  candidates: {
+    id: string; url: string; title: string; status: string;
+    metadata_hash: string; created_at: string;
+  }[];
+  documents: {
+    id: string; candidate_id: string; version: number; url: string;
+    title: string; content_hash: string; status: string; created_at: string;
+  }[];
+  claims: {
+    id: string; lesson_artifact_id: string; lesson_version: number;
+    line_number: number; claim_hash: string; document_id: string | null;
+    status: string;
+  }[];
+};
+
 export type DeliveryEvidence = {
   trace_id: string;
   run_status: string;
@@ -240,6 +266,8 @@ export type DeliveryEvidence = {
   nodes: { id: string; command_id: string | null; node: string; attempt: number; lease_epoch: number; status: string }[];
   artifacts: { id: string; version: number; kind: string; content_hash: string }[];
   provider_calls: { id: string; command_id: string | null; node_execution_id: string | null; role: string; status: string; duration_ms: number | null; input_tokens: number | null; output_tokens: number | null }[];
+  tool_calls: { id: string; command_id: string | null; node_execution_id: string | null; tool_id: string; args_hash: string; status: string; lease_epoch: number; error_code: string | null }[];
+  source_claims: { id: string; lesson_artifact_id: string; lesson_version: number; lesson_hash: string; line_number: number; claim_hash: string; document_id: string | null; document_hash: string | null; excerpt_hash: string | null; status: string }[];
   findings: {
     id: string; gate: string; rule_id: string;
     artifact_id: string; artifact_version: number;
@@ -315,6 +343,7 @@ export const api = {
   artifacts: (id: string) => request<{ items: ArtifactSummary[] }>(`/api/v0/runs/${encodeURIComponent(id)}/artifacts`),
   artifact: (id: string, version: number) => request<ArtifactFact>(`/api/v0/artifacts/${encodeURIComponent(id)}/versions/${version}`),
   execution: (id: string) => request<ExecutionReadModel>(`/api/v0/runs/${encodeURIComponent(id)}/execution`),
+  sources: (id: string) => request<SourceReadModel>(`/api/v0/runs/${encodeURIComponent(id)}/sources`),
   evidence: (id: string) => request<DeliveryEvidence>(`/api/v0/runs/${encodeURIComponent(id)}/evidence`),
   events: (id: string) => request<{ items: RunEvent[] }>(`/api/v0/runs/${encodeURIComponent(id)}/events`),
   stopRun: (id: string, key: string) => post<ExecutionCommand>(`/api/v0/runs/${encodeURIComponent(id)}/stop`, {}, key),
@@ -337,4 +366,14 @@ export const api = {
       expected_checkpoint_id: checkpoint,
       ...(action === "accept" ? { reason } : {}),
     }, key),
+  reviewSource: (id: string, payload: {
+    action: "approve" | "reject" | "propose_url" | "retry_search";
+    expected_checkpoint_id: string;
+    reason?: string;
+    candidate_id?: string;
+    metadata_hash?: string;
+    url?: string;
+  }, key: string) => post<ExecutionCommand>(
+    `/api/v0/runs/${encodeURIComponent(id)}/source-review`, payload, key,
+  ),
 };

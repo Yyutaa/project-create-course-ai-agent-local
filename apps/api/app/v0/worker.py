@@ -18,6 +18,9 @@ from app.v0.sensitive import safe_error
 from app.v0.runner import V0Runner
 from app.v0.schemas import GraphState
 from app.v0.storage import FactStore
+from app.v0.source_facts import SourceFacts
+from app.v0.source_network import DeepSeekSourceClient, OfficialIdentityVerifier
+from app.v0.source_runtime import SourceToolRuntime
 
 ROUTES = {
     "intake": route_after_intake,
@@ -39,7 +42,15 @@ class Worker:
             else LocalConfiguredProvider(LocalConfigStore(path)),
             BudgetStore(path),
         )
-        self.runner = V0Runner(self.budgeted_provider, FactStore(path))
+        facts = FactStore(path)
+        self.source_runtime = SourceToolRuntime(
+            SourceFacts(facts),
+            DeepSeekSourceClient(LocalConfigStore(path)),
+            OfficialIdentityVerifier(),
+        )
+        self.runner = V0Runner(
+            self.budgeted_provider, facts, source_runtime=self.source_runtime,
+        )
         self.owner = owner or uuid4().hex
 
     def _resume_state(self, run_id: str) -> GraphState | None:
@@ -141,6 +152,7 @@ class Worker:
     def _apply(self, command: Command, epoch: int) -> None:
         run_id = command.run_id
         self.budgeted_provider.bind(self.owner, epoch, command.id)
+        self.source_runtime.bind(self.owner, epoch, command.id, None)
         if command.kind == "STOP":
             self._mark_stopped(run_id, epoch)
             return
@@ -155,6 +167,41 @@ class Worker:
                 return
             if run.status != "running":
                 raise ValueError("Mission 审批后的 Run 状态无效")
+            state = self._resume_state(run_id)
+            if state is None:
+                return
+            checkpoint = self.execution.last_checkpoint(run_id)
+            recovery_effect = (
+                self.execution.event(run_id, checkpoint["event_id"])
+                if checkpoint and checkpoint["event_id"] else None
+            )
+            try:
+                self.runner.execute(
+                    run_id, state=state, execution=self.execution,
+                    owner=self.owner, epoch=epoch,
+                    recovery_effect=recovery_effect, command_id=command.id,
+                )
+            except StopRequested:
+                self._mark_stopped(run_id, epoch)
+            except TokenLimitReached as error:
+                self._mark_token_stopped(run_id, epoch, error)
+            if self.runner.get(run_id).status == "failed":
+                raise RuntimeError("Graph 节点业务失败；不自动重试")
+            return
+        if command.kind == "SOURCE_REVIEW":
+            decision = self.execution.apply_source_review(
+                command, self.owner, epoch,
+            )
+            if not decision["resume"]:
+                return
+            checkpoint = self.execution.last_checkpoint(run_id)
+            if (
+                decision.get("replayed") and checkpoint is not None
+                and checkpoint["id"] != command.payload["expected_checkpoint_id"]
+            ):
+                return
+            if self.runner.get(run_id).status != "running":
+                return
             state = self._resume_state(run_id)
             if state is None:
                 return

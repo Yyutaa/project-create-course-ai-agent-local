@@ -7,6 +7,8 @@ SAFE_MESSAGES = frozenset({
     "blueprint_chapter_deviation",
     "lesson_effective_chars_below_minimum",
     "token_limit_reached",
+    "source_evidence_insufficient",
+    "source_review_required",
     "Rubric 越权产生非教学 Finding",
     "Humanizer 越权产生非表达 Finding",
     "Reviewer Finding 缺少可定位的正文证据",

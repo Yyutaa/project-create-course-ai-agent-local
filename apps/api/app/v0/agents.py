@@ -141,6 +141,8 @@ class AgentExecutor:
         intake: BaseModel | None = None,
         source_refs: list[ArtifactRef] | None = None,
         inputs: list[AgentInput] | None = None,
+        source_runtime=None,
+        topic: str | None = None,
     ) -> BaseModel:
         definition = AGENT_DEFINITIONS[role]
         references = list(source_refs or [])
@@ -177,7 +179,16 @@ class AgentExecutor:
             inputs=inputs,
             output_schema=definition.output_model.model_json_schema(),
         )
-        response = self.provider.invoke(request)
+        if source_runtime is not None:
+            if role not in ("blueprint", "writer") or not topic:
+                raise ProviderError("当前角色不能调用来源工具")
+            caller = (
+                "workflow.blueprint" if role == "blueprint"
+                else "workflow.generation"
+            )
+            response = source_runtime.run(request, self.provider, caller, topic)
+        else:
+            response = self.provider.invoke(request)
         if response.role != role:
             raise ProviderError(f"{role} Provider 返回了错误角色 {response.role}")
         try:

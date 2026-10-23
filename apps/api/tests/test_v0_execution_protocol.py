@@ -25,9 +25,11 @@ def stores(tmp_path):
     )
     # These protocol tests predate Mission approval; preserve their downstream fixture.
     run.constraints_version = 0
+    run.source_evidence_version = 0
     with facts.connect() as connection:
         connection.execute(
-            "UPDATE runs SET mission_review_required=0, constraints_version=0 WHERE id=?",
+            "UPDATE runs SET mission_review_required=0, constraints_version=0, "
+            "source_evidence_version=0 WHERE id=?",
             (run.id,),
         )
         connection.execute(
@@ -164,8 +166,10 @@ def test_resume_accepts_exact_blueprint_chapter_deviation_once(tmp_path):
     )
     with facts.connect() as connection:
         connection.execute(
-            "UPDATE runs SET mission_review_required=0 WHERE id=?", (run.id,)
+            "UPDATE runs SET mission_review_required=0, source_evidence_version=0 "
+            "WHERE id=?", (run.id,)
         )
+        connection.execute("DELETE FROM snapshots WHERE run_id=?", (run.id,))
     commands = ExecutionStore(facts.path)
 
     class FourteenLessons(FakeProvider):

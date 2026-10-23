@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from app.v0.quality_loop import (
     GATE_ORDER,
+    GateReport,
     apply_repair,
     check_markdown,
     effective_character_count,
@@ -30,9 +31,11 @@ def execute_legacy(runner: V0Runner, run_id: str) -> None:
     # Quality-loop fixtures represent pre-gate Runs; Mission gate is tested separately.
     run = runner.get(run_id)
     run.constraints_version = 0
+    run.source_evidence_version = 0
     with runner.store.connect() as connection:
         connection.execute(
-            "UPDATE runs SET mission_review_required=0, constraints_version=0 WHERE id=?",
+            "UPDATE runs SET mission_review_required=0, constraints_version=0, "
+            "source_evidence_version=0 WHERE id=?",
             (run_id,),
         )
         connection.execute(
@@ -53,6 +56,31 @@ LESSON_REF = ArtifactRef(
 
 def test_gate_order_is_deterministic_then_rubric_then_humanizer():
     assert GATE_ORDER == ("deterministic", "rubric", "humanizer")
+
+
+def test_new_quality_summary_removes_source_limitation_only_after_source_pass():
+    def report(source_status):
+        return GateReport(results=[
+            GateResult(
+                gate="source", status=source_status,
+                rule_id="source.claim_support", evidence="exact page excerpt",
+                artifact_ref=LESSON_REF,
+            ),
+        ], findings=[])
+
+    verified = WorkflowNodes._quality_summary(
+        None, report("pass"), source_evidence_version=1,
+    )
+    unverified = WorkflowNodes._quality_summary(
+        None, report("fail"), source_evidence_version=1,
+    )
+    legacy = WorkflowNodes._quality_summary(
+        None, report("pass"), source_evidence_version=0,
+    )
+
+    assert "未核验事实来源" not in verified.limitations
+    assert "未核验事实来源" in unverified.limitations
+    assert "未核验事实来源" in legacy.limitations
 
 
 def test_gate_result_requires_an_explicit_status_and_evidence():

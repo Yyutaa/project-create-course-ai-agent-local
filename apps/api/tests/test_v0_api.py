@@ -38,9 +38,11 @@ def start(client, key="start-1", course=None, *, process=True, legacy=True):
         runner = app.dependency_overrides[get_runner]()
         run = runner.get(response.json()["id"])
         run.constraints_version = 0
+        run.source_evidence_version = 0
         with runner.store.connect() as connection:
             connection.execute(
-                "UPDATE runs SET mission_review_required=0, constraints_version=0 "
+                "UPDATE runs SET mission_review_required=0, constraints_version=0, "
+                "source_evidence_version=0 "
                 "WHERE id=?",
                 (response.json()["id"],),
             )
@@ -169,7 +171,7 @@ def test_create_response_preserves_constraints_but_hides_intake(client):
         "audience": "已隐藏",
         "goal": "已隐藏",
         "language": "zh",
-        "source_policy": "允许使用用户资料与公开官方资料",
+        "source_policy": "仅允许使用公开官方资料",
         "expected_chapters": 8,
         "min_effective_chars": 9000,
         "token_limit": 12345,

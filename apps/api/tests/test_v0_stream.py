@@ -104,7 +104,7 @@ def test_v10_database_migrates_to_stream_cursor(tmp_path):
         connection.execute("PRAGMA user_version=10")
 
     store.migrate()
-    assert store.schema_version() == 11
+    assert store.schema_version() == 12
     before = store.change_seq(run.id)
     ExecutionStore(store.path).accept(run.id, "STOP", {}, "stop")
     assert store.change_seq(run.id) > before

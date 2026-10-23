@@ -8,7 +8,9 @@ from uuid import uuid4
 
 from pydantic import BaseModel
 
-from app.v0.provider import AgentRequest, AgentResponse, Provider, ProviderError
+from app.v0.provider import (
+    AgentRequest, AgentResponse, Provider, ProviderError, ToolTurn,
+)
 from app.v0.storage import FactStore
 
 DEFAULT_CALL_LIMIT = 60
@@ -235,3 +237,31 @@ class BudgetedProvider:
             int((monotonic() - started) * 1000), response,
         )
         return response
+
+    def next_tool_turn(
+        self, request: AgentRequest, messages: list[dict]
+    ) -> ToolTurn:
+        if not request.run_id or self.owner is None or self.epoch is None:
+            raise ValueError("预算调用缺少 Run 或 lease")
+        call_id = self.budget.reserve(
+            request.run_id, request.role, self.owner, self.epoch,
+            self.command_id, self.node_execution_id,
+        )
+        started = monotonic()
+        try:
+            turn = self.provider.next_tool_turn(request, messages)
+        except Exception:
+            self.budget.finish(
+                call_id, self.owner, self.epoch, "FAILED",
+                int((monotonic() - started) * 1000), None,
+            )
+            raise
+        usage = AgentResponse(
+            role=request.role, payload={},
+            input_tokens=turn.input_tokens, output_tokens=turn.output_tokens,
+        )
+        self.budget.finish(
+            call_id, self.owner, self.epoch, "SUCCEEDED",
+            int((monotonic() - started) * 1000), usage,
+        )
+        return turn

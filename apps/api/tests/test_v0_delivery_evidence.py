@@ -293,9 +293,11 @@ def test_normal_delivery_path_requires_human_release_decision(tmp_path):
         "create", enqueue_start=True,
     )
     run.constraints_version = 0
+    run.source_evidence_version = 0
     with facts.connect() as connection:
         connection.execute(
-            "UPDATE runs SET mission_review_required=0, constraints_version=0 WHERE id=?",
+            "UPDATE runs SET mission_review_required=0, constraints_version=0, "
+            "source_evidence_version=0 WHERE id=?",
             (run.id,),
         )
         connection.execute(
@@ -574,8 +576,10 @@ def test_constraint_evidence_indexes_events_without_copying_course_content(tmp_p
     )
     with facts.connect() as connection:
         connection.execute(
-            "UPDATE runs SET mission_review_required=0 WHERE id=?", (run.id,)
+            "UPDATE runs SET mission_review_required=0, source_evidence_version=0 "
+            "WHERE id=?", (run.id,)
         )
+        connection.execute("DELETE FROM snapshots WHERE run_id=?", (run.id,))
     Worker(facts.path, provider=FakeProvider()).run_once()
     current = facts.get_run(run.id)
     blueprint = next(item for item in current.artifacts if item.kind == "blueprint")

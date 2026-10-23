@@ -1,6 +1,7 @@
 from app.v0.agents import AGENT_DEFINITIONS, AgentExecutor
 from app.v0.artifact_tools import ArtifactTools
 from app.v0.provider import AgentInput, FakeProvider
+from app.v0.provider import AgentResponse
 from app.v0.schemas import ArtifactRecord, ArtifactRef
 
 
@@ -103,3 +104,36 @@ def test_executor_keeps_prebuilt_context_slice_instead_of_reloading_full_content
         "mission": {"learning_goal": "完成练习"}
     }
     assert "private" not in provider.request.model_dump_json()
+
+
+def test_executor_validates_tool_loop_final_output_with_existing_schema():
+    mission = ArtifactRecord(
+        artifact_id="mission-1", version=1, run_id="run-1", kind="mission",
+        content={"scope": "Vue"}, content_hash="hash-1",
+    )
+    reference = ArtifactRef(
+        run_id="run-1", artifact_id="mission-1", version=1,
+        kind="mission", content_hash="hash-1",
+    )
+
+    class Runtime:
+        def run(self, request, provider, caller, topic):
+            assert caller == "workflow.blueprint"
+            assert topic == "Vue state"
+            return AgentResponse(role="blueprint", payload={
+                "lessons": [{
+                    "title": "Vue state", "learning_goal": "理解 state",
+                    "evidence": "解释概念",
+                }],
+            })
+
+    executor = AgentExecutor(
+        FakeProvider(),
+        ArtifactTools(AGENT_DEFINITIONS, lambda artifact_id, version: mission),
+    )
+    result = executor.invoke(
+        "blueprint", "run-1", inputs=[AgentInput(
+            kind="mission", content={"mission": mission.content}, reference=reference,
+        )], source_runtime=Runtime(), topic="Vue state",
+    )
+    assert result.lessons[0].title == "Vue state"

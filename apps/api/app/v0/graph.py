@@ -17,9 +17,11 @@ from app.v0.quality_loop import (
     review_gate,
 )
 from app.v0.runner import V0_QUALITY_LIMITATIONS
+from app.v0.source_audit import source_gate
 from app.v0.schemas import (
     BLUEPRINT_CHAPTER_DEVIATION_REASON,
     GraphState,
+    GateResult,
     LoopCounts,
     QualitySummary,
     ReleaseDecision,
@@ -327,6 +329,17 @@ class WorkflowNodes:
                 or review["content_hash"] != mission_ref.content_hash
             ):
                 raise GraphRouteError("Blueprint 缺少当前 Mission 版本的人工确认")
+        source_runtime = (
+            self.runner.source_runtime if run.source_evidence_version == 1 else None
+        )
+        if run.source_evidence_version == 1 and source_runtime is None:
+            self.runner._mark_waiting(
+                state.run_id, index, "source_evidence_insufficient",
+            )
+            return {
+                "current_node": "blueprint", "last_outcome": "waiting_for_human",
+                "exit_reason": "source_evidence_insufficient",
+            }
         pack = self.context.for_blueprint(
             state.run_id,
             mission_ref,
@@ -340,10 +353,25 @@ class WorkflowNodes:
                 if run.constraints_version == 1
                 else None
             ),
+            source_summaries=(
+                source_runtime.facts.summary_pack(state.run_id)
+                if source_runtime is not None else None
+            ),
         )
         candidate = self.runner.executor.invoke(
-            "blueprint", state.run_id, inputs=pack.inputs
+            "blueprint", state.run_id, inputs=pack.inputs,
+            source_runtime=source_runtime, topic=run.course_input.topic,
         )
+        if source_runtime is not None and not source_runtime.facts.summary_pack(
+            state.run_id
+        ):
+            self.runner._mark_waiting(
+                state.run_id, index, "source_evidence_insufficient",
+            )
+            return {
+                "current_node": "blueprint", "last_outcome": "waiting_for_human",
+                "exit_reason": "source_evidence_insufficient",
+            }
         result = assign_blueprint_ids(candidate)
         self.runner._write_role_success(
             "blueprint",
@@ -412,6 +440,20 @@ class WorkflowNodes:
 
     def _generation(self, state: GraphState, index: int) -> dict:
         run = self.runner.get(state.run_id)
+        source_runtime = (
+            self.runner.source_runtime if run.source_evidence_version == 1 else None
+        )
+        if run.source_evidence_version == 1 and (
+            source_runtime is None
+            or not source_runtime.facts.summary_pack(state.run_id)
+        ):
+            self.runner._mark_waiting(
+                state.run_id, index, "source_evidence_insufficient",
+            )
+            return {
+                "current_node": "generation", "last_outcome": "waiting_for_human",
+                "exit_reason": "source_evidence_insufficient",
+            }
         if run.batch_plan is None or run.blueprint is None:
             raise ValueError("Generation 缺少 Blueprint 或 Batch Plan")
         if (
@@ -501,9 +543,14 @@ class WorkflowNodes:
                     if run.constraints_version == 1
                     else None
                 ),
+                source_summaries=(
+                    source_runtime.facts.summary_pack(state.run_id)
+                    if source_runtime is not None else None
+                ),
             )
             candidate = self.runner.executor.invoke(
-                "writer", state.run_id, inputs=pack.inputs
+                "writer", state.run_id, inputs=pack.inputs,
+                source_runtime=source_runtime, topic=run.course_input.topic,
             )
             result = candidate.model_copy(
                 update={
@@ -612,7 +659,10 @@ class WorkflowNodes:
                     ),
                 }
         report = self._evaluate(state, lesson_ref)
-        summary = self._quality_summary(run.quality, report)
+        summary = self._quality_summary(
+            run.quality, report,
+            source_evidence_version=run.source_evidence_version,
+        )
         if any(item.status != "pass" for item in report.results):
             character_finding = self._character_finding(report.findings)
             if character_finding is not None:
@@ -742,6 +792,31 @@ class WorkflowNodes:
         ]
         if reports[-1].findings:
             return reports[-1]
+        if run.source_evidence_version == 1:
+            runtime = self.runner.source_runtime
+            if (
+                runtime is None
+                or self.runner._execution_owner is None
+                or self.runner._execution_epoch is None
+            ):
+                return GateReport([
+                    GateResult(
+                        gate="source", status="error",
+                        rule_id="source.runtime_unavailable",
+                        evidence="来源审核运行时不可用",
+                        artifact_ref=lesson_ref,
+                    ),
+                ], [])
+            reports.append(source_gate(
+                self.runner.provider, runtime.facts, lesson_ref,
+                brief.lesson_id, markdown,
+                self.runner._execution_owner, self.runner._execution_epoch,
+            ))
+            if reports[-1].results[0].status != "pass":
+                return GateReport(
+                    [result for report in reports for result in report.results],
+                    [finding for report in reports for finding in report.findings],
+                )
         pack = self.context.for_reviewer(
             state.run_id,
             self._ref(state, "mission"),
@@ -780,7 +855,10 @@ class WorkflowNodes:
         )
 
     @staticmethod
-    def _quality_summary(previous: QualitySummary | None, report: GateReport):
+    def _quality_summary(
+        previous: QualitySummary | None, report: GateReport,
+        *, source_evidence_version: int = 0,
+    ):
         status = (
             "ready"
             if all(item.status == "pass" for item in report.results)
@@ -796,7 +874,17 @@ class WorkflowNodes:
                 and report.results[-1].status == "pass"
                 else "表达 Gate 尚未通过"
             ),
-            limitations=list(V0_QUALITY_LIMITATIONS),
+            limitations=[
+                item for item in V0_QUALITY_LIMITATIONS
+                if not (
+                    item == "未核验事实来源"
+                    and source_evidence_version == 1
+                    and any(
+                        result.gate == "source" and result.status == "pass"
+                        for result in report.results
+                    )
+                )
+            ],
             gate_results=[*(previous.gate_results if previous else []), *report.results],
             evidence_findings=[
                 *(previous.evidence_findings if previous else []),
@@ -981,7 +1069,10 @@ class WorkflowNodes:
             raise GraphRouteError("Verification checkpoint 的 Candidate 不匹配")
         report = self._evaluate(state, candidate_ref)
         run = self.runner.get(state.run_id)
-        summary = self._quality_summary(run.quality, report)
+        summary = self._quality_summary(
+            run.quality, report,
+            source_evidence_version=run.source_evidence_version,
+        )
         result_start = len(summary.verification_results)
         summary.verification_results.extend(report.results)
         if state.active_finding_id and report.results:

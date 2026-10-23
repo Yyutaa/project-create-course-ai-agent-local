@@ -34,9 +34,11 @@ def prepare(runner):
     run, _ = runner.store.create_run(COURSE, "start-1", enqueue_start=True)
     legacy = runner.get(run.id)
     legacy.constraints_version = 0
+    legacy.source_evidence_version = 0
     with runner.store.connect() as connection:
         connection.execute(
-            "UPDATE runs SET mission_review_required=0, constraints_version=0 "
+            "UPDATE runs SET mission_review_required=0, constraints_version=0, "
+            "source_evidence_version=0 "
             "WHERE id=?",
             (run.id,),
         )

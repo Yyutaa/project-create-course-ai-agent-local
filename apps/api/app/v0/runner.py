@@ -40,6 +40,7 @@ class V0Runner:
         *,
         published_root=None,
         catalog_path=None,
+        source_runtime=None,
     ):
         from app.catalog import CATALOG_PATH, PUBLISHED_ROOT
 
@@ -47,6 +48,7 @@ class V0Runner:
         self.store = store
         self.published_root = published_root or PUBLISHED_ROOT
         self.catalog_path = catalog_path or CATALOG_PATH
+        self.source_runtime = source_runtime
         self._runs: dict[str, V0Run] = {}
         self._memory_artifacts: dict[tuple[str, int], ArtifactRecord] = {}
         self._lock = Lock()
@@ -319,6 +321,11 @@ class V0Runner:
         )
         if hasattr(self.provider, "node_execution_id"):
             self.provider.node_execution_id = self._execution_attempt
+        if self.source_runtime is not None:
+            self.source_runtime.bind(
+                self._execution_owner, self._execution_epoch,
+                self._execution_command_id, self._execution_attempt,
+            )
         self._execution_state = checkpoint
 
     def _node_finished(self, state: GraphState, result: dict) -> None:

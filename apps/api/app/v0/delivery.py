@@ -49,6 +49,30 @@ class TraceProviderCall(BaseModel):
     output_tokens: int | None
 
 
+class TraceToolCall(BaseModel):
+    id: str
+    command_id: str | None
+    node_execution_id: str | None
+    tool_id: str
+    args_hash: str
+    status: str
+    lease_epoch: int
+    error_code: str | None
+
+
+class TraceSourceClaim(BaseModel):
+    id: str
+    lesson_artifact_id: str
+    lesson_version: int
+    lesson_hash: str
+    line_number: int
+    claim_hash: str
+    document_id: str | None
+    document_hash: str | None
+    excerpt_hash: str | None
+    status: str
+
+
 class TraceFinding(BaseModel):
     id: str
     gate: str
@@ -101,6 +125,8 @@ class DeliveryEvidence(BaseModel):
     nodes: list[TraceNode]
     artifacts: list[TraceArtifact]
     provider_calls: list[TraceProviderCall]
+    tool_calls: list[TraceToolCall]
+    source_claims: list[TraceSourceClaim]
     findings: list[TraceFinding]
     verifications: list[TraceVerification]
     decisions: list[TraceDecision]
@@ -142,15 +168,30 @@ class DeliveryStore:
                 "duration_ms, input_tokens, output_tokens FROM provider_calls "
                 "WHERE run_id=? ORDER BY rowid", (trace_id,),
             ).fetchall()
+            tool_calls = connection.execute(
+                "SELECT id, command_id, node_execution_id, tool_id, args_hash, "
+                "status, lease_epoch, error_code FROM tool_invocations "
+                "WHERE run_id=? ORDER BY rowid", (trace_id,),
+            ).fetchall()
+            source_claims = connection.execute(
+                "SELECT id, lesson_artifact_id, lesson_version, lesson_hash, "
+                "line_number, claim_hash, document_id, document_hash, "
+                "excerpt_hash, status FROM source_claim_links "
+                "WHERE run_id=? ORDER BY rowid", (trace_id,),
+            ).fetchall()
             decisions = connection.execute(
                 "SELECT id, type, CASE type "
                 "WHEN 'mission.approved' THEN 'approve' "
                 "WHEN 'mission.revision_requested' THEN 'revise' "
                 "WHEN 'quality.risk_accepted' THEN 'accept' "
                 "WHEN 'quality.retry_requested' THEN 'retry' "
+                "WHEN 'source.approve' THEN 'approve' "
+                "WHEN 'source.reject' THEN 'reject' "
+                "WHEN 'source.propose_url' THEN 'propose_url' "
                 "ELSE release_action END AS action FROM events WHERE run_id=? AND "
                 "type IN ('mission.approved','mission.revision_requested',"
                 "'quality.risk_accepted','quality.retry_requested',"
+                "'source.approve','source.reject','source.propose_url',"
                 "'release.decided') ORDER BY id", (trace_id,),
             ).fetchall()
             budget_events = connection.execute(
@@ -263,6 +304,22 @@ class DeliveryStore:
             and node_commands[row["node_execution_id"]] != row["command_id"]
         )
         issues.extend(
+            f"tool_call:{row['id']}:missing_node"
+            for row in tool_calls
+            if row["node_execution_id"] and row["node_execution_id"] not in node_commands
+        )
+        issues.extend(
+            f"tool_call:{row['id']}:missing_command"
+            for row in tool_calls
+            if row["command_id"] and row["command_id"] not in command_ids
+        )
+        issues.extend(
+            f"tool_call:{row['id']}:command_mismatch"
+            for row in tool_calls
+            if row["node_execution_id"] in node_commands
+            and node_commands[row["node_execution_id"]] != row["command_id"]
+        )
+        issues.extend(
             f"finding:{item.id}:missing_artifact"
             for item in findings.values()
             if (item.artifact_id, item.artifact_version) not in artifact_versions
@@ -333,6 +390,8 @@ class DeliveryStore:
                 kind=row["kind"], content_hash=row["content_hash"],
             ) for row in artifacts],
             provider_calls=[TraceProviderCall(**dict(row)) for row in provider_calls],
+            tool_calls=[TraceToolCall(**dict(row)) for row in tool_calls],
+            source_claims=[TraceSourceClaim(**dict(row)) for row in source_claims],
             findings=list(findings.values()), verifications=verifications,
             decisions=[TraceDecision(
                 event_id=row["id"], kind=row["type"], action=row["action"],

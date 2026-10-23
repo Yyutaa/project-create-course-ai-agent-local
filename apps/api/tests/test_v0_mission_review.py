@@ -21,6 +21,15 @@ COURSE = CourseInput(
 )
 
 
+def disable_source_evidence(facts: FactStore, run_id: str) -> None:
+    """Keep Mission-only protocol fixtures on their original downstream path."""
+    with facts.connect() as connection:
+        connection.execute(
+            "UPDATE runs SET source_evidence_version=0 WHERE id=?", (run_id,),
+        )
+        connection.execute("DELETE FROM snapshots WHERE run_id=?", (run_id,))
+
+
 def test_v4_run_migrates_without_retroactive_mission_gate(tmp_path):
     path = tmp_path / "old.sqlite3"
     with sqlite3.connect(path) as connection:
@@ -30,7 +39,7 @@ def test_v4_run_migrates_without_retroactive_mission_gate(tmp_path):
     facts = FactStore(path)
     facts.migrate()
     facts.migrate()
-    assert facts.schema_version() == 11
+    assert facts.schema_version() == 12
     assert facts.mission_review_required("old-run") is False
 
 
@@ -177,6 +186,7 @@ def test_worker_approval_continues_from_mission_to_blueprint(tmp_path):
     facts = FactStore(tmp_path / "facts.sqlite3")
     facts.migrate()
     run, _ = facts.create_run(COURSE, "create-1", enqueue_start=True)
+    disable_source_evidence(facts, run.id)
     commands = ExecutionStore(facts.path)
     worker = Worker(facts.path, provider=FakeProvider())
     assert worker.run_once()
@@ -274,6 +284,7 @@ def test_crash_after_review_decision_replays_without_second_decision(tmp_path):
     facts = FactStore(tmp_path / "facts.sqlite3")
     facts.migrate()
     run, _ = facts.create_run(COURSE, "create-1", enqueue_start=True)
+    disable_source_evidence(facts, run.id)
     commands = ExecutionStore(facts.path)
     first = Worker(facts.path, provider=FakeProvider(), owner="worker-a")
     first.run_once()

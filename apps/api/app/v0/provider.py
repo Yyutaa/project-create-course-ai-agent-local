@@ -8,11 +8,12 @@ from langchain_core.exceptions import OutputParserException
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_deepseek import ChatDeepSeek
 from langsmith import tracing_context
-from openai import APIConnectionError, APIStatusError, APITimeoutError
+from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.v0.local_config import ConfigError, LocalConfigStore
 from app.v0.schemas import AgentRole, ArtifactRef
+from app.v0.source_tools import FetchInput, SearchInput
 
 
 InputKind = Literal["intake", "mission", "blueprint", "batch_plan", "lesson", "quality"]
@@ -60,8 +61,43 @@ class AgentResponse(BaseModel):
     output_tokens: int | None = None
 
 
+class ToolCall(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    arguments: dict
+
+
+class ToolTurn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str | None = None
+    tool_calls: list[ToolCall] = Field(default_factory=list)
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
+SOURCE_FUNCTIONS = [
+    {"type": "function", "function": {
+        "name": "course_source_search",
+        "description": "Find candidate public pages. Results are not verified evidence.",
+        "parameters": SearchInput.model_json_schema(),
+    }},
+    {"type": "function", "function": {
+        "name": "course_source_fetch",
+        "description": "Fetch a candidate by its ID after runtime approval.",
+        "parameters": FetchInput.model_json_schema(),
+    }},
+]
+
+
 class Provider(Protocol):
     def invoke(self, request: AgentRequest) -> AgentResponse: ...
+
+    def next_tool_turn(
+        self, request: AgentRequest, messages: list[dict]
+    ) -> ToolTurn: ...
 
 
 class RealProvider:
@@ -137,6 +173,54 @@ class RealProvider:
         except Exception:
             raise ProviderError(f"{request.role} 模型调用失败") from None
 
+    def next_tool_turn(
+        self, request: AgentRequest, messages: list[dict]
+    ) -> ToolTurn:
+        if not all((self.base_url, self.model, self.api_key)):
+            raise ProviderError("LLM 配置不完整：请设置 base_url、model 和 api_key")
+        try:
+            client = OpenAI(
+                base_url=self.base_url, api_key=self.api_key,
+                timeout=240, max_retries=0,
+            )
+            with tracing_context(enabled=False):
+                response = client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=SOURCE_FUNCTIONS,
+                    tool_choice="auto",
+                    max_tokens=32768 if request.role == "writer" else 8192,
+                )
+            message = response.choices[0].message
+            calls = []
+            for item in message.tool_calls or []:
+                arguments = json.loads(item.function.arguments)
+                if not isinstance(arguments, dict):
+                    raise ProviderError("模型工具参数不是 JSON 对象")
+                calls.append(ToolCall(
+                    id=item.id, name=item.function.name, arguments=arguments,
+                ))
+            return ToolTurn(
+                content=message.content,
+                tool_calls=calls,
+                input_tokens=(response.usage.prompt_tokens if response.usage else None),
+                output_tokens=(
+                    response.usage.completion_tokens if response.usage else None
+                ),
+            )
+        except APIStatusError as error:
+            raise ProviderError(
+                f"{request.role} 模型接口返回 HTTP {error.status_code}"
+            ) from None
+        except (APIConnectionError, APITimeoutError):
+            raise ProviderError(f"{request.role} 模型接口不可用或超时") from None
+        except ProviderError:
+            raise
+        except (KeyError, TypeError, ValueError, IndexError):
+            raise ProviderError("模型工具响应格式无效") from None
+        except Exception:
+            raise ProviderError(f"{request.role} 模型调用失败") from None
+
 
 class LocalConfiguredProvider:
     """Resolve the local setting for each model call, never at Worker startup."""
@@ -150,6 +234,17 @@ class LocalConfiguredProvider:
         except ConfigError:
             raise ProviderError("请配置 DeepSeek 后再运行") from None
         return RealProvider("https://api.deepseek.com", model, key).invoke(request)
+
+    def next_tool_turn(
+        self, request: AgentRequest, messages: list[dict]
+    ) -> ToolTurn:
+        try:
+            model, key = self.config.require_credentials()
+        except ConfigError:
+            raise ProviderError("请配置 DeepSeek 后再运行") from None
+        return RealProvider(
+            "https://api.deepseek.com", model, key
+        ).next_tool_turn(request, messages)
 
 
 class FakeProvider:
@@ -197,3 +292,8 @@ class FakeProvider:
             },
         }
         return AgentResponse(role=request.role, payload=fixtures[request.role])
+
+    def next_tool_turn(
+        self, request: AgentRequest, messages: list[dict]
+    ) -> ToolTurn:
+        return ToolTurn(content=json.dumps(self.invoke(request).payload, ensure_ascii=False))

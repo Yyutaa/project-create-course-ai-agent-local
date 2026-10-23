@@ -3,6 +3,7 @@ import json
 import httpx
 import pytest
 from langchain_deepseek import ChatDeepSeek
+from openai import OpenAI
 
 from app.v0.provider import (
     AgentInput,
@@ -178,3 +179,51 @@ def test_real_provider_does_not_retry_or_echo_network_errors(monkeypatch):
         )
     assert len(calls) == 1
     assert "private-do-not-echo" not in str(caught.value)
+
+
+def test_real_provider_returns_function_proposal_without_executing_it(monkeypatch):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={
+            "id": "tool-turn", "object": "chat.completion", "created": 1,
+            "model": "deepseek-flash", "choices": [{
+                "index": 0, "finish_reason": "tool_calls",
+                "message": {"role": "assistant", "content": None, "tool_calls": [{
+                    "id": "call-search", "type": "function", "function": {
+                        "name": "course_source_search",
+                        "arguments": '{"query":"Vue state official docs"}',
+                    },
+                }]},
+            }],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 5,
+                      "total_tokens": 17},
+        })
+
+    monkeypatch.setattr(
+        "app.v0.provider.OpenAI",
+        lambda **kwargs: OpenAI(
+            **kwargs, http_client=httpx.Client(transport=httpx.MockTransport(respond))
+        ),
+    )
+    request = mission_request().model_copy(update={"role": "blueprint"})
+    turn = RealProvider(
+        "https://api.deepseek.com", "deepseek-flash", "test-key"
+    ).next_tool_turn(request, [{"role": "user", "content": "find official sources"}])
+
+    assert turn.tool_calls[0].name == "course_source_search"
+    assert turn.tool_calls[0].arguments == {"query": "Vue state official docs"}
+    assert (turn.input_tokens, turn.output_tokens) == (12, 5)
+    body = json.loads(requests[0].content)
+    assert body["tools"][0]["function"]["name"] == "course_source_search"
+    assert body["tool_choice"] == "auto"
+    assert body["max_tokens"] == 8192
+
+    RealProvider(
+        "https://api.deepseek.com", "deepseek-flash", "test-key"
+    ).next_tool_turn(
+        request.model_copy(update={"role": "writer"}),
+        [{"role": "user", "content": "write sourced lesson"}],
+    )
+    assert json.loads(requests[1].content)["max_tokens"] == 32768

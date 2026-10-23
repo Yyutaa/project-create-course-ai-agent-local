@@ -1,6 +1,7 @@
 """SQLite command inbox and fenced local Worker execution facts."""
 
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 import json
 from pathlib import Path
 from typing import Literal
@@ -22,9 +23,13 @@ from app.v0.sensitive import (
     safe_waiting_reason,
 )
 from app.v0.budget import BudgetStore, BudgetSummary, TokenLimitReached
+from app.v0.source_facts import SourceFacts
+from app.v0.source_tools import is_direct_document_host
+from app.v0.source_tools import canonical_public_url
 
 CommandKind = Literal[
-    "START", "STOP", "RESUME", "REVISE", "MISSION_REVIEW", "QUALITY_REVIEW"
+    "START", "STOP", "RESUME", "REVISE", "MISSION_REVIEW", "QUALITY_REVIEW",
+    "SOURCE_REVIEW",
 ]
 CommandStatus = Literal["ACCEPTED", "CLAIMED", "APPLIED", "FAILED", "REJECTED"]
 
@@ -77,6 +82,21 @@ class QualityReviewView(BaseModel):
     checkpoint_id: str
 
 
+class SourceCandidateView(BaseModel):
+    id: str
+    url: str
+    title: str
+    status: str
+    metadata_hash: str
+
+
+class SourceReviewView(BaseModel):
+    checkpoint_id: str
+    candidates: list[SourceCandidateView]
+    hidden_candidate_count: int
+    retry_remaining: int
+
+
 class ExecutionReadModel(BaseModel):
     run_id: str
     commands: list[CommandView]
@@ -89,6 +109,7 @@ class ExecutionReadModel(BaseModel):
     budget: BudgetSummary
     mission_review: MissionReviewView | None = None
     quality_review: QualityReviewView | None = None
+    source_review: SourceReviewView | None = None
 
 
 class ExecutionStore:
@@ -111,7 +132,8 @@ class ExecutionStore:
         if not key:
             raise ValueError("Idempotency-Key 不能为空")
         if kind not in (
-            "START", "STOP", "RESUME", "REVISE", "MISSION_REVIEW", "QUALITY_REVIEW"
+            "START", "STOP", "RESUME", "REVISE", "MISSION_REVIEW",
+            "QUALITY_REVIEW", "SOURCE_REVIEW",
         ):
             raise ValueError("未知 Command 类型")
         encoded = _json(payload)
@@ -401,6 +423,169 @@ class ExecutionStore:
             return dict(connection.execute(
                 "SELECT * FROM mission_reviews WHERE id=?", (decision_id,)
             ).fetchone())
+
+    def apply_source_review(
+        self, command: Command, owner: str, epoch: int,
+    ) -> dict:
+        if command.kind != "SOURCE_REVIEW":
+            raise ValueError("Command 不是来源审批")
+        payload = command.payload
+        action = payload.get("action")
+        reason = payload.get("reason")
+        expected = payload.get("expected_checkpoint_id")
+        if action not in ("approve", "reject", "propose_url", "retry_search"):
+            raise ValueError("来源审批动作无效")
+        if action == "approve" and (
+            not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 2000
+        ):
+            raise ValueError("来源审批说明必须为 1 至 2000 字符")
+        if reason is not None and (
+            not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 2000
+        ):
+            raise ValueError("来源审批说明必须为 1 至 2000 字符")
+        if action == "retry_search" and (
+            reason is not None or payload.get("candidate_id")
+            or payload.get("metadata_hash") or payload.get("url")
+        ):
+            raise ValueError("继续查找不接受候选或人工说明")
+        if not isinstance(expected, str) or not expected:
+            raise ValueError("来源审批 checkpoint 缺失")
+        proposed_url = None
+        if action == "propose_url":
+            proposed_url = canonical_public_url(str(payload.get("url") or ""))
+            if not is_direct_document_host(proposed_url):
+                raise ValueError("共享托管地址不能作为官方文档站点")
+            if payload.get("candidate_id") or payload.get("metadata_hash"):
+                raise ValueError("提供 URL 时不能同时审批旧候选")
+        elif action != "retry_search" and payload.get("url") is not None:
+            raise ValueError("审批候选时不能提交新 URL")
+        now = _utc().isoformat()
+        with self.facts.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_lease(connection, command.run_id, owner, epoch)
+            claim = connection.execute(
+                "SELECT status, claimed_by FROM commands WHERE id=?",
+                (command.id,),
+            ).fetchone()
+            if claim is None or claim["status"] != "CLAIMED" or (
+                claim["claimed_by"] != owner
+            ):
+                raise PermissionError("Command 已被其他 Worker 接管")
+            replay = connection.execute(
+                "SELECT id, action FROM source_decisions WHERE command_id=?",
+                (command.id,),
+            ).fetchone()
+            if replay:
+                return {
+                    "id": replay["id"],
+                    "resume": replay["action"] in ("approve", "retry_search"),
+                    "replayed": True,
+                }
+            run = self.facts._get_run(connection, command.run_id)
+            checkpoint = connection.execute(
+                "SELECT id, position, state_json FROM checkpoints WHERE run_id=? "
+                "ORDER BY rowid DESC LIMIT 1", (command.run_id,),
+            ).fetchone()
+            if (
+                checkpoint is None or checkpoint["id"] != expected
+                or checkpoint["position"] != "after_node"
+            ):
+                raise ValueError("来源审批 checkpoint 已过期")
+            state = GraphState.model_validate_json(checkpoint["state_json"])
+            if state.current_node not in ("blueprint", "generation"):
+                raise ValueError("当前节点不支持来源审批")
+            stage_index = 2 if state.current_node == "blueprint" else 4
+            stage = run.stages[stage_index]
+            if (
+                run.source_evidence_version != 1
+                or run.status != "waiting_for_human"
+                or stage.status != "waiting_for_human"
+                or stage.failure_reason not in (
+                    "source_evidence_insufficient", "source_review_required",
+                )
+            ):
+                raise ValueError("Run 未等待来源人工确认")
+            if action == "retry_search":
+                attempts = connection.execute(
+                    "SELECT COUNT(*) FROM source_decisions "
+                    "WHERE run_id=? AND action='retry_search'", (command.run_id,),
+                ).fetchone()[0]
+                if attempts >= 2:
+                    raise ValueError("自动继续查找次数已用尽")
+                candidate_id = None
+                reason = "要求继续自动查找公开官方资料"
+            elif proposed_url is not None:
+                reason = reason or "人工补充公开官方资料候选地址"
+                candidate_id = sha256(
+                    f"{command.run_id}:{proposed_url}".encode("utf-8")
+                ).hexdigest()[:32]
+                metadata_hash = sha256(
+                    _json({"proposed_url": proposed_url}).encode("utf-8")
+                ).hexdigest()
+                connection.execute(
+                    "INSERT OR IGNORE INTO source_candidates "
+                    "(id, run_id, url, title, status, metadata_hash, created_at) "
+                    "VALUES (?, ?, ?, '人工提供的候选地址', 'needs_human', ?, ?)",
+                    (candidate_id, command.run_id, proposed_url, metadata_hash, now),
+                )
+            else:
+                if action == "reject":
+                    reason = reason or "人工排除该来源候选"
+                candidate_id = payload.get("candidate_id")
+                metadata_hash = payload.get("metadata_hash")
+                candidate = connection.execute(
+                    "SELECT id, url, metadata_hash, status FROM source_candidates "
+                    "WHERE id=? AND run_id=?", (candidate_id, command.run_id),
+                ).fetchone()
+                if (
+                    candidate is None or candidate["metadata_hash"] != metadata_hash
+                    or candidate["status"] not in ("candidate", "needs_human")
+                ):
+                    raise ValueError("来源候选引用已过期或不可审批")
+                if action == "approve" and not is_direct_document_host(
+                    candidate["url"]
+                ):
+                    raise ValueError("共享托管地址不能作为官方文档站点")
+                prior = connection.execute(
+                    "SELECT 1 FROM source_decisions WHERE run_id=? "
+                    "AND candidate_id=? AND action IN ('approve','reject') LIMIT 1",
+                    (command.run_id, candidate_id),
+                ).fetchone()
+                if prior:
+                    raise ValueError("当前候选版本已有人工决定")
+                connection.execute(
+                    "UPDATE source_candidates SET status=? WHERE id=?",
+                    ("human_approved" if action == "approve" else "rejected",
+                     candidate_id),
+                )
+            decision_id = uuid4().hex
+            connection.execute(
+                "INSERT INTO source_decisions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (decision_id, command.run_id, candidate_id, expected, action,
+                 reason.strip(), command.id, now),
+            )
+            resumed = action in ("approve", "retry_search")
+            if resumed:
+                run.status = "running"
+                stage.status = "pending"
+                stage.failure_reason = None
+                connection.execute(
+                    "UPDATE runs SET status='running', updated_at=? WHERE id=?",
+                    (now, command.run_id),
+                )
+            event_id = connection.execute(
+                "INSERT INTO events(run_id, stage, type, status, request_key, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (command.run_id, state.current_node, f"source.{action}",
+                 run.status, command.id, now),
+            ).lastrowid
+            run.revision = event_id
+            connection.execute(
+                "UPDATE snapshots SET revision=?, projection_json=?, updated_at=? "
+                "WHERE run_id=?",
+                (event_id, run.model_dump_json(), now, command.run_id),
+            )
+            return {"id": decision_id, "resume": resumed, "replayed": False}
 
     def apply_quality_review(
         self, command: Command, owner: str, epoch: int
@@ -753,6 +938,12 @@ class ExecutionStore:
         state = GraphState.model_validate_json(checkpoint["state_json"])
         if state.current_node == "release":
             raise ValueError("release 仍需人工决定，不能由 RESUME 替代")
+        if state.current_node in ("blueprint", "generation"):
+            active = run.stages[2 if state.current_node == "blueprint" else 4]
+            if active.status == "waiting_for_human" and active.failure_reason in (
+                "source_evidence_insufficient", "source_review_required",
+            ):
+                raise ValueError("来源尚未获人工确认，不能由 RESUME 替代")
         if state.current_node == "mission" and self.facts.mission_review_required(run_id):
             mission_ref = state.artifact_refs.get("mission")
             if mission_ref is not None:
@@ -834,9 +1025,38 @@ class ExecutionStore:
                         ),
                         checkpoint_id=(checkpoint["id"] if checkpoint and not approved else None),
                     )
+        source_review = None
         quality_review = None
         if checkpoint is not None and checkpoint["position"] == "after_node":
             state = GraphState.model_validate_json(checkpoint["state_json"])
+            if state.current_node in ("blueprint", "generation"):
+                stage = run.stages[2 if state.current_node == "blueprint" else 4]
+                if (
+                    run.source_evidence_version == 1
+                    and run.status == "waiting_for_human"
+                    and stage.status == "waiting_for_human"
+                    and stage.failure_reason in (
+                        "source_evidence_insufficient", "source_review_required",
+                    )
+                ):
+                    all_candidates = SourceFacts(self.facts).list_candidates(run_id)
+                    reviewable = [
+                        item for item in all_candidates
+                        if item["status"] == "needs_human"
+                        and is_direct_document_host(item["url"])
+                    ]
+                    retries = SourceFacts(self.facts).retry_round(run_id)
+                    source_review = SourceReviewView(
+                        checkpoint_id=checkpoint["id"],
+                        candidates=[
+                            SourceCandidateView.model_validate(item)
+                            for item in reviewable[:3]
+                        ],
+                        hidden_candidate_count=len(all_candidates) - min(
+                            len(reviewable), 3,
+                        ),
+                        retry_remaining=max(0, 2 - retries),
+                    )
             with self.facts.connect() as connection:
                 technical_retry = self._retryable_reviewer_failure(
                     connection, run, checkpoint, state
@@ -889,6 +1109,7 @@ class ExecutionStore:
             "budget": BudgetStore(self.facts.path).summary(run_id),
             "mission_review": mission_review,
             "quality_review": quality_review,
+            "source_review": source_review,
         })
 
     def last_checkpoint(self, run_id: str) -> dict | None:

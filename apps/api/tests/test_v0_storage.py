@@ -16,12 +16,45 @@ def test_migration_is_repeatable_and_preserves_rows(tmp_path):
             ("c1", "第一门课", "c1", "2026-09-22T00:00:00Z"),
         )
     store.migrate()
-    assert store.schema_version() == 11
+    assert store.schema_version() == 12
     with store.connect() as connection:
         assert (
             connection.execute("SELECT title FROM courses WHERE id='c1'").fetchone()[0]
             == "第一门课"
         )
+
+
+def test_new_runs_require_official_policy_without_writing_partial_facts(tmp_path):
+    store = storage.FactStore(tmp_path / "facts.sqlite3")
+    store.migrate()
+    course = storage.CourseInput(
+        topic="Vue state", audience="初学者", goal="理解 state", language="zh",
+        source_policy="仅限使用内部提供材料",
+    )
+
+    with pytest.raises(ValueError, match="仅允许使用公开官方资料"):
+        store.create_run(course, "internal-policy", enqueue_start=True)
+
+    with store.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM courses").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM commands").fetchone()[0] == 0
+
+
+def test_new_run_source_evidence_version_survives_snapshot_rebuild(tmp_path):
+    store = storage.FactStore(tmp_path / "facts.sqlite3")
+    store.migrate()
+    run, _ = store.create_run(
+        storage.CourseInput(
+            topic="Vue", audience="初学者", goal="理解 state", language="zh",
+            source_policy="仅允许使用公开官方资料",
+        ),
+        "official-policy",
+    )
+    with store.connect() as connection:
+        connection.execute("DELETE FROM snapshots WHERE run_id=?", (run.id,))
+
+    assert store.get_run(run.id).source_evidence_version == 1
 
 
 def test_v7_migration_preserves_legacy_run_without_enabling_constraints(tmp_path):
@@ -43,7 +76,7 @@ def test_v7_migration_preserves_legacy_run_without_enabling_constraints(tmp_path
     store.migrate()
     store.migrate()
 
-    assert store.schema_version() == 11
+    assert store.schema_version() == 12
     with store.connect() as connection:
         run = connection.execute(
             "SELECT constraints_version FROM runs WHERE id='legacy-run'"
@@ -53,6 +86,10 @@ def test_v7_migration_preserves_legacy_run_without_enabling_constraints(tmp_path
             "FROM intakes WHERE run_id='legacy-run'"
         ).fetchone()
     assert run[0] == 0
+    with store.connect() as connection:
+        assert connection.execute(
+            "SELECT source_evidence_version FROM runs WHERE id='legacy-run'"
+        ).fetchone()[0] == 0
     assert tuple(intake) == (12, 12_000, None)
 
 
@@ -64,7 +101,7 @@ def test_new_run_constraints_survive_snapshot_rebuild_and_affect_idempotency(tmp
         audience="初学者",
         goal="完成页面",
         language="zh",
-        source_policy="仅公开官方资料",
+        source_policy="仅允许使用公开官方资料",
         expected_chapters=8,
         min_effective_chars=6_000,
         token_limit=50_000,
@@ -93,7 +130,8 @@ def test_new_run_constraints_survive_snapshot_rebuild_and_affect_idempotency(tmp
     assert rebuilt.course_input.expected_chapters == 8
     assert rebuilt.course_input.min_effective_chars == 6_000
     assert rebuilt.course_input.token_limit == 50_000
-    assert rebuilt.course_input.source_policy == "仅公开官方资料"
+    assert rebuilt.course_input.source_policy == "仅允许使用公开官方资料"
+    assert rebuilt.source_evidence_version == 1
 
 
 def test_foreign_keys_and_transaction_rollback(tmp_path):
@@ -137,7 +175,7 @@ def test_migration_upgrades_v1_artifacts_without_inventing_provenance(tmp_path):
     store = storage.FactStore(path)
     store.migrate()
 
-    assert store.schema_version() == 11
+    assert store.schema_version() == 12
     with store.connect() as connection:
         columns = {
             row[1] for row in connection.execute("PRAGMA table_info(artifacts)").fetchall()
@@ -224,7 +262,7 @@ def test_v2_database_upgrades_to_execution_protocol_without_recreating_runs(tmp_
     store.migrate()
 
     with store.connect() as connection:
-        assert store.schema_version() == 11
+        assert store.schema_version() == 12
         assert connection.execute("SELECT id FROM runs").fetchone()[0] == "existing-run"
         assert connection.execute(
             "SELECT mission_review_required FROM runs WHERE id='existing-run'"

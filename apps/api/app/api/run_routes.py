@@ -23,6 +23,8 @@ from app.v0.storage import FactStore
 from app.v0.execution import Command, CommandView, ExecutionReadModel, ExecutionStore
 from app.v0.delivery import DeliveryEvidence, DeliveryStore
 from app.v0.sensitive import safe_recorded_error
+from app.v0.source_facts import SourceFacts
+from app.v0.source_tools import canonical_public_url, is_direct_document_host
 
 
 router = APIRouter(prefix="/api/v0/runs", tags=["v0-runs"])
@@ -96,6 +98,70 @@ class QualityReviewInput(BaseModel):
         if self.action == "retry" and self.reason is not None:
             raise ValueError("重新检查 Quality 不接受说明")
         return self
+
+
+class SourceReviewInput(BaseModel):
+    action: Literal["approve", "reject", "propose_url", "retry_search"]
+    expected_checkpoint_id: str = Field(min_length=1)
+    reason: str | None = Field(default=None, min_length=1, max_length=2000)
+    candidate_id: str | None = None
+    metadata_hash: str | None = None
+    url: str | None = None
+
+    @model_validator(mode="after")
+    def validate_target(self) -> "SourceReviewInput":
+        if self.action == "retry_search":
+            if self.reason is not None or self.candidate_id or self.metadata_hash or self.url:
+                raise ValueError("继续查找不接受候选、URL 或人工说明")
+        elif self.action == "propose_url":
+            if self.candidate_id or self.metadata_hash or not self.url:
+                raise ValueError("提供 URL 时不可同时指定候选")
+            self.url = canonical_public_url(self.url)
+            if not is_direct_document_host(self.url):
+                raise ValueError("共享托管地址不能作为官方文档站点")
+        elif self.url or not self.candidate_id or not self.metadata_hash:
+            raise ValueError("来源审批必须绑定精确候选及元数据 hash")
+        if self.action == "approve" and not (self.reason or "").strip():
+            raise ValueError("确认官方来源必须填写判断依据")
+        if self.reason is not None and not self.reason.strip():
+            raise ValueError("来源审批说明不能为空")
+        return self
+
+
+class SourceCandidateView(BaseModel):
+    id: str
+    url: str
+    title: str
+    status: str
+    metadata_hash: str
+    created_at: str
+
+
+class SourceDocumentView(BaseModel):
+    id: str
+    candidate_id: str
+    version: int
+    url: str
+    title: str
+    content_hash: str
+    status: str
+    created_at: str
+
+
+class SourceClaimView(BaseModel):
+    id: str
+    lesson_artifact_id: str
+    lesson_version: int
+    line_number: int
+    claim_hash: str
+    document_id: str | None
+    status: str
+
+
+class SourceReadModel(BaseModel):
+    candidates: list[SourceCandidateView]
+    documents: list[SourceDocumentView]
+    claims: list[SourceClaimView]
 
 
 def _public_run(run: V0Run) -> V0Run:
@@ -216,6 +282,41 @@ def review_quality(
     return _accept_command(
         run_id, "QUALITY_REVIEW", review.model_dump(exclude_none=True),
         runner, idempotency_key,
+    )
+
+
+@router.post("/{run_id}/source-review", status_code=202, response_model=CommandView)
+def review_source(
+    run_id: str, review: SourceReviewInput,
+    runner: RunnerDep, idempotency_key: IdempotencyKey,
+) -> Command:
+    return _accept_command(
+        run_id, "SOURCE_REVIEW", review.model_dump(exclude_none=True),
+        runner, idempotency_key,
+    )
+
+
+@router.get("/{run_id}/sources", response_model=SourceReadModel)
+def read_sources(run_id: str, runner: RunnerDep) -> SourceReadModel:
+    try:
+        runner.get(run_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Run 不存在") from error
+    facts = SourceFacts(runner.store)
+    candidates = facts.list_candidates(run_id)
+    documents = [
+        {key: value for key, value in document.items()
+         if key not in ("content", "identity_json")}
+        for document in facts.list_documents(run_id)
+    ]
+    with runner.store.connect() as connection:
+        claims = [dict(row) for row in connection.execute(
+            "SELECT id, lesson_artifact_id, lesson_version, line_number, "
+            "claim_hash, document_id, status FROM source_claim_links "
+            "WHERE run_id=? ORDER BY created_at, id", (run_id,),
+        ).fetchall()]
+    return SourceReadModel(
+        candidates=candidates, documents=documents, claims=claims,
     )
 
 

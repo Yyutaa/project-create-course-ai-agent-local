@@ -68,12 +68,31 @@ export function canResumeRun(
   run: Pick<V0Run, "status"> & {
     stages: Pick<V0Run["stages"][number], "failure_reason">[];
   },
-  execution?: { budget: Pick<ExecutionReadModel["budget"], "token_exhausted"> } | null,
+  execution?: {
+    budget: Pick<ExecutionReadModel["budget"], "token_exhausted">;
+    source_review?: ExecutionReadModel["source_review"];
+  } | null,
 ): boolean {
   const resumable = run.status === "stopped" || run.status === "waiting_for_human";
   const tokenStopped = execution?.budget.token_exhausted
     || run.stages.some((stage) => stage.failure_reason === "token_limit_reached");
-  return resumable && !tokenStopped;
+  return resumable && !tokenStopped && !execution?.source_review;
+}
+
+export function sourceReviewSummary(
+  review: Pick<NonNullable<ExecutionReadModel["source_review"]>,
+    "candidates" | "hidden_candidate_count" | "retry_remaining">,
+): string {
+  if (!Number.isInteger(review.hidden_candidate_count)
+    || !Number.isInteger(review.retry_remaining)) {
+    return "来源复核接口尚未更新，请重启本地 API 和 Worker";
+  }
+  const count = review.candidates.length;
+  const pending = count > 0
+    ? `${count} 个来源需人工判断` : "没有可人工确认的候选";
+  return review.hidden_candidate_count > 0
+    ? `${pending}；${review.hidden_candidate_count} 条检索记录已收起`
+    : pending;
 }
 
 export function shouldPoll(status: V0Run["status"]): boolean {

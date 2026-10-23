@@ -91,13 +91,15 @@ class ContextPackBuilder:
         *,
         expected_chapters: int | None = None,
         source_policy: str | None = None,
+        source_summaries: list[dict] | None = None,
     ) -> ContextPack:
         mission = self._load(run_id, mission_ref)
         content = {
             "mission": mission.content,
-            "source_summaries": [],
-            "source_limitations": ["当前 Run 未提供已批准来源摘要"],
+            "source_summaries": source_summaries or [],
         }
+        if source_summaries is None:
+            content["source_limitations"] = ["当前 Run 未提供已批准来源摘要"]
         if expected_chapters is not None:
             content["generation_constraints"] = {
                 "expected_chapters": expected_chapters
@@ -126,6 +128,7 @@ class ContextPackBuilder:
         previous_lesson_ref: ArtifactRef | None = None,
         min_effective_chars: int | None = None,
         source_policy: str | None = None,
+        source_summaries: list[dict] | None = None,
     ) -> ContextPack:
         self._load(run_id, mission_ref)
         blueprint = self._load(run_id, blueprint_ref)
@@ -157,6 +160,7 @@ class ContextPackBuilder:
             ledger,
             min_effective_chars,
             source_policy,
+            source_summaries,
         )
         truncated = False
         for field, empty in (
@@ -179,6 +183,7 @@ class ContextPackBuilder:
                         ledger,
                         min_effective_chars,
                         source_policy,
+                        source_summaries,
                     )
         return self._pack("writer", inputs, truncated=truncated)
 
@@ -240,6 +245,7 @@ class ContextPackBuilder:
         ledger: list[dict],
         min_effective_chars: int | None,
         source_policy: str | None,
+        source_summaries: list[dict] | None,
     ) -> list[AgentInput]:
         mission_content = {}
         if min_effective_chars is not None:
@@ -248,6 +254,9 @@ class ContextPackBuilder:
             }
         if source_policy:
             mission_content["source_policy"] = source_policy
+        blueprint_content = {"current_lesson_brief": brief}
+        if source_summaries is not None:
+            blueprint_content["source_summaries"] = source_summaries
         return [
             AgentInput(
                 kind="mission",
@@ -257,7 +266,7 @@ class ContextPackBuilder:
             AgentInput(
                 kind="blueprint",
                 reference=blueprint_ref,
-                content={"current_lesson_brief": brief},
+                content=blueprint_content,
             ),
             AgentInput(
                 kind="batch_plan",

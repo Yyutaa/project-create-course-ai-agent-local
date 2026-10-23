@@ -28,7 +28,7 @@ NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_lengt
 SourcePolicy = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=300)
 ]
-DEFAULT_SOURCE_POLICY = "允许使用用户资料与公开官方资料"
+DEFAULT_SOURCE_POLICY = "仅允许使用公开官方资料"
 ContextTerm = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)
 ]
@@ -174,7 +174,7 @@ class ReviewFinding(BaseModel):
 class GateResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    gate: Literal["deterministic", "rubric", "humanizer"]
+    gate: Literal["deterministic", "source", "rubric", "humanizer"]
     status: Literal["pass", "fail", "error", "not_applicable"]
     rule_id: NonEmptyText
     evidence: NonEmptyText
@@ -201,7 +201,7 @@ class Finding(BaseModel):
 
     finding_id: NonEmptyText
     run_id: NonEmptyText
-    gate: Literal["deterministic", "rubric", "humanizer"]
+    gate: Literal["deterministic", "source", "rubric", "humanizer"]
     rule_id: NonEmptyText
     artifact_ref: ArtifactRef
     location: FindingLocation
@@ -346,6 +346,7 @@ class V0Run(BaseModel):
     course_id: str | None = None
     course_input: CourseInput
     constraints_version: int = Field(default=0, ge=0, le=1)
+    source_evidence_version: int = Field(default=0, ge=0, le=1)
     revision: int = 0
     artifacts: list[ArtifactSummary] = Field(default_factory=list)
     status: RunStatus = "running"

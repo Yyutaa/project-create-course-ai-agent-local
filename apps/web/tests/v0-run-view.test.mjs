@@ -39,6 +39,69 @@ test("connected stream reduces polling while retaining a refresh fallback", () =
   assert.equal(runView.pollInterval({ status: "published" }, true), false);
 });
 
+test("source review uses exact checkpoint and prevents generic resume", async () => {
+  const run = { status: "waiting_for_human", stages: [
+    { failure_reason: "source_evidence_insufficient" },
+  ] };
+  assert.equal(canResumeRun(run, {
+    budget: { token_exhausted: false },
+    source_review: { checkpoint_id: "checkpoint-1", candidates: [] },
+  }), false);
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (path, init) => {
+    calls.push({ path, init });
+    return new Response(JSON.stringify({ candidates: [], documents: [], claims: [] }),
+      { status: 200 });
+  };
+  try {
+    await api.sources("run-1");
+    await api.reviewSource("run-1", {
+      action: "approve", candidate_id: "candidate-1", metadata_hash: "hash-1",
+      reason: "官方归属已核对", expected_checkpoint_id: "checkpoint-1",
+    }, "review-1");
+    assert.deepEqual(calls.map((call) => [call.path, call.init?.method]), [
+      ["/api/v0/runs/run-1/sources", undefined],
+      ["/api/v0/runs/run-1/source-review", "POST"],
+    ]);
+    assert.equal(JSON.parse(calls[1].init.body).metadata_hash, "hash-1");
+    assert.equal(calls[1].init.headers["Idempotency-Key"], "review-1");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("source review summarizes only actionable candidates", () => {
+  assert.equal(runView.sourceReviewSummary?.({
+    candidates: [{ id: "one" }], hidden_candidate_count: 14,
+    retry_remaining: 2,
+  }), "1 个来源需人工判断；14 条检索记录已收起");
+  assert.equal(runView.sourceReviewSummary?.({
+    candidates: [], hidden_candidate_count: 15, retry_remaining: 0,
+  }), "没有可人工确认的候选；15 条检索记录已收起");
+  assert.equal(runView.sourceReviewSummary?.({ candidates: Array(15).fill({}) }),
+    "来源复核接口尚未更新，请重启本地 API 和 Worker");
+});
+
+test("source retry command omits candidate and written reason", async () => {
+  const originalFetch = globalThis.fetch;
+  let payload;
+  globalThis.fetch = async (_path, init) => {
+    payload = JSON.parse(init.body);
+    return new Response(JSON.stringify({ id: "command-1" }), { status: 202 });
+  };
+  try {
+    await api.reviewSource("run-1", {
+      action: "retry_search", expected_checkpoint_id: "checkpoint-1",
+    }, "retry-1");
+    assert.deepEqual(payload, {
+      action: "retry_search", expected_checkpoint_id: "checkpoint-1",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 
 test("course progress names the current step and its state", () => {
   assert.equal(runView.courseProgressLabel?.({

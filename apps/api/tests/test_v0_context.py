@@ -336,3 +336,23 @@ def test_legacy_mission_pack_omits_source_policy():
     )
 
     assert "source_policy" not in pack.inputs[0].content
+
+
+def test_new_source_pack_contains_only_approved_excerpts_without_internal_warning():
+    builder, records = fixture_builder()
+    sources = [{
+        "document_id": "doc-1", "url": "https://vuejs.org/guide",
+        "title": "Vue Guide", "excerpt": "Reactive state updates views.",
+    }]
+    blueprint = builder.for_blueprint(
+        "run-1", reference(records["mission"]), source_summaries=sources,
+    )
+    assert blueprint.inputs[0].content["source_summaries"] == sources
+    assert "source_limitations" not in blueprint.inputs[0].content
+
+    writer = builder.for_writer(
+        "run-1", reference(records["mission"]),
+        reference(records["blueprint"]), reference(records["batch_plan"]),
+        lesson_index=0, source_summaries=sources,
+    )
+    assert writer.inputs[1].content["source_summaries"] == sources
