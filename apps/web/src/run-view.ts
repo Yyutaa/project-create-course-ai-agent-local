@@ -19,6 +19,15 @@ export function stageDisplayName(name: string): string {
   return index < 0 ? name : STAGE_NAMES[index];
 }
 
+export function courseContentHeading(
+  stage: Pick<V0Run["stages"][number], "name" | "status"> | null,
+  runStatus: V0Run["status"],
+): string | null {
+  if (!stage || stage.status === "pending"
+    || !["generation", "quality", "release"].includes(stage.name)) return null;
+  return runStatus === "published" ? "章节内容（已发布）" : "章节内容（草稿）";
+}
+
 export function courseProgressLabel(course: Pick<CourseProgress, "current_stage" | "stage_status">): string {
   return `第 ${STAGES.indexOf(course.current_stage) + 1}/7 步 · ${course.current_stage} · ${STAGE_STATUS_LABELS[course.stage_status]}`;
 }

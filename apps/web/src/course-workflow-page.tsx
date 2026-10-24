@@ -6,7 +6,7 @@ import { clearPendingKey, pendingKey } from "./idempotency";
 import {
   budgetTokenLabel,
   canResumeRun, canStartRun, canDecideRelease, canPublish,
-  canReviewMission, canReviewQuality, courseCreationAction,
+  canReviewMission, canReviewQuality, courseContentHeading, courseCreationAction,
   continuityLedgerLabels, pollInterval,
   runPath, shouldPoll, sourceReviewSummary, stageDisplayName,
 } from "./run-view";
@@ -62,6 +62,7 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
   const displayedStage = run
     ? run.stages.find((stage) => stage.name === selectedStage) ?? activeStage(run)
     : null;
+  const contentHeading = run ? courseContentHeading(displayedStage, run.status) : null;
   const contentQuery = useQuery({
     queryKey: ["run-content", runId],
     queryFn: () => api.runContent(runId!),
@@ -467,9 +468,9 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
                   content={contentQuery.data} execution={executionQuery.data}
                   intake={intakeQuery.data} intakeLoading={intakeQuery.isPending}
                   intakeError={intakeQuery.isError} />
-                {displayedStage?.name === "generation" && displayedStage.status !== "pending" && contentQuery.data &&
+                {contentHeading && contentQuery.data &&
                   <details aria-label="课程内容" className="course-content" id="course-content">
-                    <summary>章节内容（草稿）</summary>
+                    <summary>{contentHeading}</summary>
                     {contentQuery.data.chapters.length === 0 &&
                       <p>蓝图尚未生成，章节内容待补充。</p>}
                     {contentQuery.data.chapters.map((chapter, index) => (

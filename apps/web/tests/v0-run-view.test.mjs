@@ -32,6 +32,21 @@ test("seven stages keep fixed IDs and screenshot display names", () => {
   ]);
 });
 
+test("course content stays visible through quality and release", () => {
+  assert.equal(runView.courseContentHeading?.({ name: "generation", status: "running" }, "running"),
+    "章节内容（草稿）");
+  assert.equal(runView.courseContentHeading?.({ name: "quality", status: "waiting_for_human" },
+    "waiting_for_human"), "章节内容（草稿）");
+  assert.equal(runView.courseContentHeading?.({ name: "release", status: "waiting_for_human" },
+    "waiting_for_human"), "章节内容（草稿）");
+  assert.equal(runView.courseContentHeading?.({ name: "release", status: "succeeded" },
+    "published"), "章节内容（已发布）");
+  assert.equal(runView.courseContentHeading?.({ name: "quality", status: "pending" }, "running"),
+    null);
+  assert.equal(runView.courseContentHeading?.({ name: "mission", status: "succeeded" }, "running"),
+    null);
+});
+
 test("connected stream reduces polling while retaining a refresh fallback", () => {
   assert.equal(runView.pollInterval({ status: "running" }, true), 30_000);
   assert.equal(runView.pollInterval({ status: "waiting_for_human" }, true), 30_000);
