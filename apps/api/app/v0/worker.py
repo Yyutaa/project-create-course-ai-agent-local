@@ -261,7 +261,7 @@ class Worker:
         if command.kind == "RESUME":
             if run.status not in ("stopped", "waiting_for_human"):
                 raise ValueError("RESUME 仅允许从停止或等待人工状态继续")
-            self.execution.prepare_resume(run_id, self.owner, epoch)
+            self.execution.prepare_resume(run_id, self.owner, epoch, command.payload)
         elif run.status != "running":
             run, checkpoint = self._reconcile_after_artifact(run_id, epoch)
             if run.status in ("waiting_for_human", "stopped", "ready_for_release"):

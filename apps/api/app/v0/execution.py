@@ -922,8 +922,11 @@ class ExecutionStore:
                         "command_id": command.id}), command.run_id),
             )
 
-    def prepare_resume(self, run_id: str, owner: str, epoch: int) -> None:
+    def prepare_resume(
+        self, run_id: str, owner: str, epoch: int, payload: dict | None = None,
+    ) -> None:
         run = self.facts.get_run(run_id)
+        payload = payload or {}
         with self.facts.connect() as connection:
             token_stopped = connection.execute(
                 "SELECT 1 FROM events WHERE run_id=? "
@@ -938,6 +941,14 @@ class ExecutionStore:
         state = GraphState.model_validate_json(checkpoint["state_json"])
         if state.current_node == "release":
             raise ValueError("release 仍需人工决定，不能由 RESUME 替代")
+        if run.planning_loop_version == 1 and state.current_node in (
+            "mission", "blueprint"
+        ):
+            stage = run.stages[1 if state.current_node == "mission" else 2]
+            if stage.failure_reason and stage.failure_reason.startswith(
+                "provider_transient_exhausted_"
+            ) and payload.get("expected_checkpoint_id") != checkpoint["id"]:
+                raise ValueError("技术重试需匹配当前精确 checkpoint")
         if state.current_node in ("blueprint", "generation"):
             active = run.stages[2 if state.current_node == "blueprint" else 4]
             if active.status == "waiting_for_human" and active.failure_reason in (
@@ -968,6 +979,15 @@ class ExecutionStore:
                     blueprint_ref,
                 )
             ):
+                if run.planning_loop_version == 1:
+                    if payload.get("expected_checkpoint_id") != checkpoint["id"]:
+                        raise ValueError("Blueprint 偏差接受需匹配当前 checkpoint")
+                    try:
+                        supplied = ArtifactRef.model_validate(payload.get("blueprint_ref"))
+                    except Exception as error:
+                        raise ValueError("Blueprint 偏差接受缺少精确引用") from error
+                    if supplied != blueprint_ref:
+                        raise ValueError("Blueprint 偏差接受的版本已过期")
                 self.facts.record(
                     run,
                     "blueprint.chapter_deviation_accepted",

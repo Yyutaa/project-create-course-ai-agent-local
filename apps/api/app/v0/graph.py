@@ -6,9 +6,9 @@ from langgraph.graph import END, START, StateGraph
 
 from app.v0.batching import assign_blueprint_ids, build_batch_plan, complete_batch
 from app.v0.context import ContextBudgetError, ContextPackBuilder
-from app.v0.budget import BudgetExceeded
+from app.v0.budget import BudgetExceeded, RetryStopped
 from app.v0.sensitive import safe_error
-from app.v0.provider import AgentInput, ProviderError
+from app.v0.provider import AgentInput, ProviderError, TransientProviderError
 from app.v0.quality_loop import (
     GateReport,
     apply_repair,
@@ -62,6 +62,8 @@ def route_after_blueprint(state: GraphState) -> str:
 
 
 def route_after_batch_plan(state: GraphState) -> str:
+    if state.last_outcome == "succeeded" and state.exit_reason == "blueprint_replan":
+        return "blueprint"
     return _route_standard(state, "generation")
 
 
@@ -231,6 +233,25 @@ class WorkflowNodes:
                 "last_outcome": "waiting_for_human",
                 "exit_reason": error.code,
             }
+        except RetryStopped as error:
+            self.runner._mark_waiting(state.run_id, index, error.code)
+            return {
+                "current_node": stage,
+                "last_outcome": "waiting_for_human",
+                "exit_reason": error.code,
+            }
+        except TransientProviderError as error:
+            if stage not in ("mission", "blueprint") or (
+                self.runner.get(state.run_id).planning_loop_version != 1
+            ):
+                self.runner._mark_failed(state.run_id, index, safe_error(error))
+                return {"current_node": stage, "last_outcome": "failed"}
+            reason = f"provider_transient_exhausted_{error.reason}"
+            self.runner._mark_waiting(state.run_id, index, reason)
+            return {
+                "current_node": stage, "last_outcome": "waiting_for_human",
+                "exit_reason": reason,
+            }
         except (ProviderError, ValueError) as error:
             self.runner._mark_failed(state.run_id, index, safe_error(error))
         except Exception:
@@ -321,6 +342,13 @@ class WorkflowNodes:
     def _blueprint(self, state: GraphState, index: int) -> dict:
         run = self.runner.get(state.run_id)
         mission_ref = self._ref(state, "mission")
+        previous_ref = state.artifact_refs.get("blueprint")
+        replanning = bool(
+            run.planning_loop_version == 1 and previous_ref is not None
+            and self.runner._has_artifact_event(
+                state.run_id, "blueprint.replan_requested", previous_ref,
+            )
+        )
         if self.runner.store and self.runner.store.mission_review_required(state.run_id):
             review = self.runner.store.latest_mission_review(state.run_id)
             if not review or review["action"] != "approve" or (
@@ -357,10 +385,16 @@ class WorkflowNodes:
                 source_runtime.facts.summary_pack(state.run_id)
                 if source_runtime is not None else None
             ),
+            previous_blueprint_ref=previous_ref if replanning else None,
         )
         candidate = self.runner.executor.invoke(
             "blueprint", state.run_id, inputs=pack.inputs,
             source_runtime=source_runtime, topic=run.course_input.topic,
+            planning_goal=(
+                f"规划恰好 {run.course_input.expected_chapters} 章；遵守已批准 Mission "
+                "与来源边界，不得为凑章伪造内容或来源证据。"
+                if run.planning_loop_version == 1 else None
+            ),
         )
         if source_runtime is not None and not source_runtime.facts.summary_pack(
             state.run_id
@@ -380,13 +414,14 @@ class WorkflowNodes:
             "blueprint",
             result,
             result.lessons[0].title,
-            [mission_ref],
+            [mission_ref, previous_ref] if replanning else [mission_ref],
         )
         reference = self.runner._source_refs(state.run_id, ("blueprint",))[0]
         return {
             "current_node": "blueprint",
             "artifact_refs": {**state.artifact_refs, "blueprint": reference},
             "last_outcome": "succeeded",
+            "exit_reason": None,
         }
 
     def _batch_plan(self, state: GraphState, index: int) -> dict:
@@ -395,6 +430,25 @@ class WorkflowNodes:
         blueprint = run.blueprint
         if blueprint is None:
             raise ValueError("Batch Plan 缺少 Blueprint")
+        if run.planning_loop_version == 1:
+            versions = [item for item in run.artifacts if item.kind == "blueprint"]
+            if not versions or (
+                versions[-1].artifact_id != blueprint_ref.artifact_id
+                or versions[-1].version != blueprint_ref.version
+                or versions[-1].content_hash != blueprint_ref.content_hash
+            ):
+                raise GraphRouteError("Batch Plan 未引用当前 Blueprint 版本")
+            if len(versions) > 1:
+                if len(versions) != 2 or state.loop_counts.blueprint_replans != 1:
+                    raise GraphRouteError("Blueprint 再规划版本或计数不一致")
+                prior = next(
+                    (ref for ref in versions[-1].source_refs if ref.kind == "blueprint"),
+                    None,
+                )
+                if prior is None or not self.runner._has_artifact_event(
+                    state.run_id, "blueprint.replan_requested", prior,
+                ):
+                    raise GraphRouteError("Blueprint 新版缺少再规划证据")
         if run.constraints_version == 1:
             self.runner._record_artifact_event(
                 state.run_id,
@@ -402,8 +456,10 @@ class WorkflowNodes:
                 "batch_plan",
                 blueprint_ref,
             )
-            outside_tolerance = (
-                abs(len(blueprint.lessons) - run.course_input.expected_chapters) > 1
+            difference = abs(len(blueprint.lessons) - run.course_input.expected_chapters)
+            outside_tolerance = difference > (
+                0 if run.planning_loop_version == 1
+                and run.course_input.expected_chapters <= 2 else 1
             )
             accepted = self.runner._has_artifact_event(
                 state.run_id,
@@ -411,6 +467,32 @@ class WorkflowNodes:
                 blueprint_ref,
             )
             if outside_tolerance and not accepted:
+                if run.planning_loop_version == 1:
+                    count = state.loop_counts.blueprint_replans
+                    requested = self.runner._has_artifact_event(
+                        state.run_id, "blueprint.replan_requested", blueprint_ref,
+                    )
+                    if len(versions) == 1 and count in (0, 1):
+                        if count == 1 and not requested:
+                            raise GraphRouteError("Blueprint 再规划计数缺少 Event")
+                        if not requested:
+                            self.runner._record_artifact_event(
+                                state.run_id, "blueprint.replan_requested",
+                                "batch_plan", blueprint_ref,
+                            )
+                        return {
+                            "current_node": "batch_plan", "last_outcome": "succeeded",
+                            "exit_reason": "blueprint_replan",
+                            "loop_counts": state.loop_counts.model_copy(
+                                update={"blueprint_replans": 1}
+                            ),
+                        }
+                    if len(versions) != 2 or count != 1:
+                        raise GraphRouteError("Blueprint 再规划版本或计数不一致")
+                    self.runner._record_artifact_event(
+                        state.run_id, "blueprint.replan_exhausted",
+                        "batch_plan", blueprint_ref,
+                    )
                 self.runner._mark_waiting(
                     state.run_id,
                     index,
@@ -436,6 +518,7 @@ class WorkflowNodes:
             "current_node": "batch_plan",
             "artifact_refs": {**state.artifact_refs, "batch_plan": reference},
             "last_outcome": "succeeded",
+            "exit_reason": None,
         }
 
     def _generation(self, state: GraphState, index: int) -> dict:
@@ -1277,6 +1360,13 @@ def build_graph(
             elif name in ("intake", "mission", "blueprint", "batch_plan") and (
                 runner.get(state.run_id).stages[runner.stage_index(name)].status
                 == "succeeded"
+                and not (
+                    name == "blueprint" and state.artifact_refs.get("blueprint")
+                    and runner._has_artifact_event(
+                        state.run_id, "blueprint.replan_requested",
+                        state.artifact_refs["blueprint"],
+                    )
+                )
                 and not (
                     name == "mission" and runner.store
                     and runner.store.mission_review_required(state.run_id)

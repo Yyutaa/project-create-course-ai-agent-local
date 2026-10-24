@@ -3,7 +3,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.catalog import CatalogError
 from app.v0.provider import LocalConfiguredProvider
@@ -65,6 +65,13 @@ class RevisionInput(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
     expected_checkpoint_id: str = Field(min_length=1)
     provider_limit: int | None = Field(default=None, ge=80)
+
+
+class ResumeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_checkpoint_id: str | None = None
+    blueprint_ref: ArtifactRef | None = None
 
 
 class MissionReviewInput(BaseModel):
@@ -243,8 +250,14 @@ def stop_run(run_id: str, runner: RunnerDep, idempotency_key: IdempotencyKey) ->
 
 
 @router.post("/{run_id}/resume", status_code=202, response_model=CommandView)
-def resume_run(run_id: str, runner: RunnerDep, idempotency_key: IdempotencyKey) -> Command:
-    return _accept_command(run_id, "RESUME", {}, runner, idempotency_key)
+def resume_run(
+    run_id: str, runner: RunnerDep, idempotency_key: IdempotencyKey,
+    request: ResumeInput | None = None,
+) -> Command:
+    return _accept_command(
+        run_id, "RESUME", request.model_dump(exclude_none=True) if request else {},
+        runner, idempotency_key,
+    )
 
 
 @router.post("/{run_id}/revise", status_code=202, response_model=CommandView)

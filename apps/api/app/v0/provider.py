@@ -23,6 +23,16 @@ class ProviderError(RuntimeError):
     """A model request failed without exposing credentials or raw prompts."""
 
 
+class TransientProviderError(ProviderError):
+    """Only a confirmed timeout or HTTP 429 may receive one bounded retry."""
+
+    def __init__(self, reason: str):
+        if reason not in ("timeout", "http_429"):
+            raise ValueError("未知临时故障类型")
+        self.reason = reason
+        super().__init__("模型调用超时" if reason == "timeout" else "模型接口限流")
+
+
 class AgentInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -161,10 +171,14 @@ class RealProvider:
                 output_tokens=usage.get("output_tokens"),
             )
         except APIStatusError as error:
+            if error.status_code == 429:
+                raise TransientProviderError("http_429") from None
             raise ProviderError(
                 f"{request.role} 模型接口返回 HTTP {error.status_code}"
             ) from None
-        except (APIConnectionError, APITimeoutError):
+        except APITimeoutError:
+            raise TransientProviderError("timeout") from None
+        except APIConnectionError:
             raise ProviderError(f"{request.role} 模型接口不可用或超时") from None
         except ProviderError:
             raise
@@ -209,10 +223,14 @@ class RealProvider:
                 ),
             )
         except APIStatusError as error:
+            if error.status_code == 429:
+                raise TransientProviderError("http_429") from None
             raise ProviderError(
                 f"{request.role} 模型接口返回 HTTP {error.status_code}"
             ) from None
-        except (APIConnectionError, APITimeoutError):
+        except APITimeoutError:
+            raise TransientProviderError("timeout") from None
+        except APIConnectionError:
             raise ProviderError(f"{request.role} 模型接口不可用或超时") from None
         except ProviderError:
             raise

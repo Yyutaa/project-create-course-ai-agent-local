@@ -4,17 +4,23 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 from time import monotonic
+from typing import Callable, TypeVar
 from uuid import uuid4
 
+from langgraph.config import get_config
+from langgraph.func import task
+from langgraph.types import RetryPolicy
 from pydantic import BaseModel
 
 from app.v0.provider import (
     AgentRequest, AgentResponse, Provider, ProviderError, ToolTurn,
+    TransientProviderError,
 )
 from app.v0.storage import FactStore
 
 DEFAULT_CALL_LIMIT = 60
 WARNING_CALLS = 48
+CallResult = TypeVar("CallResult", AgentResponse, ToolTurn)
 
 
 def warning_threshold(limit: int) -> int:
@@ -23,6 +29,13 @@ def warning_threshold(limit: int) -> int:
 
 class BudgetExceeded(ProviderError):
     code = "provider_budget_exceeded"
+
+
+class RetryStopped(ProviderError):
+    code = "stop_requested_during_provider_retry"
+
+    def __init__(self):
+        super().__init__(self.code)
 
 
 class TokenLimitReached(RuntimeError):
@@ -76,6 +89,7 @@ class BudgetStore:
     def reserve(
         self, run_id: str, role: str, owner: str, epoch: int,
         command_id: str | None, node_execution_id: str | None,
+        *, retry_reason: str | None = None,
     ) -> str:
         now = datetime.now(timezone.utc).isoformat()
         exhausted = False
@@ -88,6 +102,11 @@ class BudgetStore:
             ).fetchone()
             if lease is None:
                 raise PermissionError("lease 已失效，禁止 Provider 调用")
+            if retry_reason is not None and connection.execute(
+                "SELECT 1 FROM run_controls WHERE run_id=? AND stop_requested=1",
+                (run_id,),
+            ).fetchone():
+                raise RetryStopped()
             limit = connection.execute(
                 "SELECT provider_limit FROM budget_limits WHERE run_id=?", (run_id,)
             ).fetchone()
@@ -117,6 +136,25 @@ class BudgetStore:
         if exhausted:
             raise BudgetExceeded("Provider 调用预算耗尽，需要人工处理")
         return call_id
+
+    def transient_failures(self, node_execution_id: str) -> int:
+        with self.facts.connect() as connection:
+            return connection.execute(
+                "SELECT COUNT(*) FROM provider_calls WHERE node_execution_id=? "
+                "AND status IN ('FAILED_TIMEOUT', 'FAILED_429')",
+                (node_execution_id,),
+            ).fetchone()[0]
+
+    def retry_enabled(self, run_id: str) -> bool:
+        with self.facts.connect() as connection:
+            row = connection.execute(
+                "SELECT runs.planning_loop_version, "
+                "COALESCE(controls.stop_requested, 0) AS stop_requested "
+                "FROM runs LEFT JOIN run_controls AS controls "
+                "ON controls.run_id=runs.id "
+                "WHERE runs.id=?", (run_id,),
+            ).fetchone()
+            return bool(row and row[0] == 1 and not row[1])
 
     def finish(
         self, call_id: str, owner: str, epoch: int, status: str,
@@ -217,51 +255,76 @@ class BudgetedProvider:
         self.owner, self.epoch, self.command_id = owner, epoch, command_id
 
     def invoke(self, request: AgentRequest) -> AgentResponse:
+        return self._call(
+            request, lambda: self.provider.invoke(request), lambda value: value,
+        )
+
+    def _call(
+        self, request: AgentRequest, operation: Callable[[], CallResult],
+        usage: Callable[[CallResult], AgentResponse],
+    ) -> CallResult:
         if not request.run_id or self.owner is None or self.epoch is None:
             raise ValueError("预算调用缺少 Run 或 lease")
-        call_id = self.budget.reserve(
-            request.run_id, request.role, self.owner, self.epoch,
-            self.command_id, self.node_execution_id,
-        )
-        started = monotonic()
-        try:
-            response = self.provider.invoke(request)
-        except Exception:
-            self.budget.finish(
-                call_id, self.owner, self.epoch, "FAILED",
-                int((monotonic() - started) * 1000), None,
+        retry_reason: str | None = None
+
+        def attempt() -> CallResult:
+            nonlocal retry_reason
+            call_id = self.budget.reserve(
+                request.run_id, request.role, self.owner, self.epoch,
+                self.command_id, self.node_execution_id,
+                retry_reason=retry_reason,
             )
-            raise
-        self.budget.finish(
-            call_id, self.owner, self.epoch, "SUCCEEDED",
-            int((monotonic() - started) * 1000), response,
+            started = monotonic()
+            try:
+                response = operation()
+            except TransientProviderError as error:
+                self.budget.finish(
+                    call_id, self.owner, self.epoch,
+                    "FAILED_TIMEOUT" if error.reason == "timeout" else "FAILED_429",
+                    int((monotonic() - started) * 1000), None,
+                )
+                retry_reason = error.reason
+                raise
+            except Exception:
+                self.budget.finish(
+                    call_id, self.owner, self.epoch, "FAILED",
+                    int((monotonic() - started) * 1000), None,
+                )
+                raise
+            self.budget.finish(
+                call_id, self.owner, self.epoch, "SUCCEEDED",
+                int((monotonic() - started) * 1000), usage(response),
+            )
+            return response
+
+        try:
+            get_config()
+        except RuntimeError:
+            return attempt()
+        retry_policy = RetryPolicy(
+            max_attempts=2, initial_interval=0.1, jitter=False,
+            retry_on=lambda error: (
+                isinstance(error, TransientProviderError) and self._may_retry(request)
+            ),
         )
-        return response
+        return task(attempt, retry_policy=retry_policy)().result()
+
+    def _may_retry(self, request: AgentRequest) -> bool:
+        return bool(
+            request.role in ("mission", "blueprint")
+            and self.node_execution_id
+            and self.budget.retry_enabled(request.run_id)
+            and self.budget.transient_failures(self.node_execution_id) == 1
+        )
 
     def next_tool_turn(
         self, request: AgentRequest, messages: list[dict]
     ) -> ToolTurn:
-        if not request.run_id or self.owner is None or self.epoch is None:
-            raise ValueError("预算调用缺少 Run 或 lease")
-        call_id = self.budget.reserve(
-            request.run_id, request.role, self.owner, self.epoch,
-            self.command_id, self.node_execution_id,
+        return self._call(
+            request,
+            lambda: self.provider.next_tool_turn(request, messages),
+            lambda turn: AgentResponse(
+                role=request.role, payload={},
+                input_tokens=turn.input_tokens, output_tokens=turn.output_tokens,
+            ),
         )
-        started = monotonic()
-        try:
-            turn = self.provider.next_tool_turn(request, messages)
-        except Exception:
-            self.budget.finish(
-                call_id, self.owner, self.epoch, "FAILED",
-                int((monotonic() - started) * 1000), None,
-            )
-            raise
-        usage = AgentResponse(
-            role=request.role, payload={},
-            input_tokens=turn.input_tokens, output_tokens=turn.output_tokens,
-        )
-        self.budget.finish(
-            call_id, self.owner, self.epoch, "SUCCEEDED",
-            int((monotonic() - started) * 1000), usage,
-        )
-        return turn

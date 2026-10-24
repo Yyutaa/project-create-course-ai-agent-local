@@ -92,6 +92,7 @@ class ContextPackBuilder:
         expected_chapters: int | None = None,
         source_policy: str | None = None,
         source_summaries: list[dict] | None = None,
+        previous_blueprint_ref: ArtifactRef | None = None,
     ) -> ContextPack:
         mission = self._load(run_id, mission_ref)
         content = {
@@ -106,15 +107,35 @@ class ContextPackBuilder:
             }
         if source_policy:
             content["source_policy"] = source_policy
-        return self._pack(
-            "blueprint",
-            [
-                AgentInput(
+        inputs = [AgentInput(
                     kind="mission",
                     reference=mission_ref,
                     content=content,
-                )
-            ],
+                )]
+        if previous_blueprint_ref is not None:
+            previous = self._load(run_id, previous_blueprint_ref)
+            lessons = previous.content.get("lessons", [])
+            titles = [
+                f"{index + 1}. {str(item.get('title', ''))[:48]}"
+                for index, item in enumerate(lessons)
+            ]
+            summary = {
+                "previous_chapter_count": len(lessons),
+                "previous_titles": titles,
+                "omitted_chapters": 0,
+            }
+            inputs.append(AgentInput(
+                kind="blueprint", reference=previous_blueprint_ref,
+                content=summary,
+            ))
+            while self._length(inputs) > CONTEXT_BUDGETS["blueprint"] and titles:
+                titles = titles[::2]
+                if len(titles) == len(summary["previous_titles"]):
+                    titles = []
+                summary["previous_titles"] = titles
+                summary["omitted_chapters"] = len(lessons) - len(titles)
+        return self._pack(
+            "blueprint", inputs, truncated=previous_blueprint_ref is not None,
         )
 
     def for_writer(

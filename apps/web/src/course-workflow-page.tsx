@@ -188,7 +188,19 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
       const body = kind === "REVISE" ? `${revisionText}:${executionQuery.data?.checkpoint?.id}` : kind;
       const key = pendingKey(sessionStorage, `${kind}:${runId}`, body);
       if (kind === "STOP") return api.stopRun(runId, key);
-      if (kind === "RESUME") return api.resumeRun(runId, key);
+      if (kind === "RESUME") {
+        const checkpoint = executionQuery.data?.checkpoint?.id;
+        const blueprint = run?.artifacts.filter((item) => item.kind === "blueprint").at(-1);
+        return api.resumeRun(runId, key, {
+          ...(checkpoint ? { expected_checkpoint_id: checkpoint } : {}),
+          ...(chapterDeviation && run?.planning_loop_version === 1 && blueprint
+            ? { blueprint_ref: {
+              run_id: runId, artifact_id: blueprint.artifact_id,
+              version: blueprint.version, kind: "blueprint" as const,
+              content_hash: blueprint.content_hash,
+            } } : {}),
+        });
+      }
       const checkpoint = executionQuery.data?.checkpoint?.id;
       if (!checkpoint) throw new Error("缺少可修订的 checkpoint");
       return api.reviseRun(runId, revisionText.trim(), checkpoint, key);

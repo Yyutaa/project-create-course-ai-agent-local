@@ -235,8 +235,9 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
   自动测试、手工验收和未验证分别标记，一次成功演示不代表生产保证。
 - 仅当并发积压、存储故障、恢复目标或权限隔离等风险有可复现观测证据，才评估
   队列、对象存储、更强运行时或鉴权隔离。不得把先进架构当作默认升级。
-- 本阶段不自动发布、不扩展云组件，也不实现业务失败节点重试。完整证据与已知
-  限制见本节约定。
+- 本阶段不自动发布、不扩展云组件；仅新 Run 允许本文件约束的 Blueprint 有限再规划
+  和 Mission/Blueprint Provider 临时故障窄范围重试，不引入通用业务失败节点重试。
+  完整证据与已知限制见本节约定。
 
 ## Mission 人工确认门禁
 
@@ -285,20 +286,34 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 
 ## 课程生成约束
 
-- 现行 SQLite schema 版本为 11，可从 v7 起重复迁移。`intakes` 持久保存
+- 现行 SQLite schema 版本为 13，可从 v7 起重复迁移。`intakes` 持久保存
   `source_policy`、`expected_chapters`、`min_effective_chars`、`token_limit`，`runs` 保存
   `constraints_version`，`publications` 保存已发布课程。迁移前 Run 固定为版本 0，不追溯
   执行新约束；新 Run 固定为版本 1。
-- 新 Run 默认期望 12 章、单章至少 12000 个有效字符，Token 默认不限制，来源政策默认
-  `允许使用用户资料与公开官方资料`。四项约束属于不可变 Intake，创建后无编辑入口；
+- 新 Run 默认期望 12 章、单章至少 12000 个有效字符，Token 默认不限制，来源政策固定
+  `仅允许使用公开官方资料`。四项约束属于不可变 Intake，创建后无编辑入口；
   创建幂等哈希必须包含四项约束。
-- 来源政策是课程可用的资料来源边界（`用户资料+官方资料` / `仅内部资料` /
-  `仅公开官方资料` / `扩展资料并交叉核验` 四选一），随 Intake 进入 mission、blueprint、
-  writer 的 Context Pack，约束模型的范围与断言口径。V0 不执行真实联网检索与来源登记，
-  政策仅作为约束口径；真正的检索与来源核验属于后续独立能力。
-- Blueprint 实际章节数与期望值相差不超过 1 时继续；超出后在 `batch_plan` 前以
-  `blueprint_chapter_deviation` 等待人工。`RESUME` 只接受当前精确 Blueprint 版本，
-  写入幂等的 `blueprint.chapter_deviation_accepted` 后继续。
+- 旧 Run 保留原来的四类来源政策与 `source_evidence_version=0`，不得追溯改写；
+  新 Run 固定 `source_evidence_version=1`，仅开放公开官方一手资料。来源政策随 Intake
+  进入 Mission、Blueprint、Writer 的 Context Pack；Blueprint 的 research 及 Writer
+  可经 Worker 内受控 ToolRuntime 请求 DeepSeek Search/Fetch。搜索结果仅是候选，
+  已准入页面的内容与身份凭据持久登记后才可用作课程证据。
+- v13 迁移为既有 Run 设置 `planning_loop_version=0`，其 Blueprint 章数仍沿用 ±1
+  容差并在超出时等待人工。新 Run 固定 `planning_loop_version=1`：期望 1–2 章
+  必须严格相等，期望至少 3 章允许 ±1。首次超出范围在 Batch Plan 前记录绑定
+  当前 Blueprint 的 `blueprint.replan_requested`，最多回到 Blueprint 再规划一次；
+  新版 Artifact 同时引用获批 Mission 与前版 Blueprint，旧版不可覆盖。再次超出记录
+  `blueprint.replan_exhausted` 并以 `blueprint_chapter_deviation` 等待人工。Graph State
+  计数与 Event 交叉核对，接管时复用已提交事实；再规划 Context Pack 仅携带有界
+  前版章节摘要，完整前版仍由精确 ArtifactRef 保留。新 Run 的偏差接受 `RESUME` 必须
+  绑定当前 checkpoint 与 Blueprint ArtifactRef，写入幂等
+  `blueprint.chapter_deviation_accepted`；旧 Run 的接受行为不变。
+- 仅新 Run 的 Mission/Blueprint Provider 调用边界可对明确超时、HTTP 429 自动
+  增加至多一次技术尝试，同一 NodeExecution 共用上限，每次真实调用都先预留预算；
+  客户端内置重试为零。重试预留与 STOP 检查在同一事务中完成；两次仍失败以稳定原因
+  等待人工。解析/Schema 错误、来源不足
+  与教学方案不合格不属于临时故障；Worker 恢复不计为业务返工。不得在整个 Graph
+  节点上套用 RetryPolicy，且不得绕过 lease、STOP、预算或 Mission 人工确认。
 - 有效字符统计去除 Markdown 标记、HTML 标签和空白，保留代码内容。低于下限时产生绑定
   精确 Lesson ArtifactRef 的 `lesson.effective_chars.minimum` 阻断 Finding，并以
   `lesson_effective_chars_below_minimum` 等待人工；不得交给单行 Repair 自动扩写。
@@ -309,6 +324,38 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 - Token 阈值不改变既有 48/60 次 Provider 调用预算、质量返工预算、七步顺序或人工
   release 权限。约束状态进入安全读取模型和证据索引，但不得复制 Intake、正文、Prompt、
   模型原始响应或密钥。
+
+## 官方来源核验与受控 ToolRuntime
+
+- ToolManifest 为不可变静态注册项，仅含 `id`、`callers`、`idempotent`；本期白名单
+  只有 `course.source.search` 和 `course.source.fetch`，只允许 blueprint/generation
+  调用。模型提出函数请求，Worker 校验参数、有效 lease、来源边界及预算后执行；
+  Provider 不执行工具。每 Run 上限为 Search 20 次、Fetch 40 次，每次网络请求 20 秒、
+  页面 64 KiB、模型工具循环 6 轮。构建、任意 Shell、工作区补丁不开放。
+- URL 限 HTTPS 公开主机，不接受凭据、IP 字面量、私网、本地地址或跳转；Fetch
+  仅按本 Run 候选 ID 调用。DeepSeek Fetch 不提供最终跳转 URL，故厂商返回正文不直接
+  充当证据；已批准原站须通过固定公网 IP、TLS 主机名的禁跳转 GET 再取得证据正文。
+  自动归属只接受可核对的维护方身份链及文档型路径；npm 注册信息与维护仓库
+  文档主域一致时，可核验该主域下的文档子域，不能用相似域名或搜索标题代替锚点。
+  搜索优先限定到锚定的官方主域；旧候选在重试时可由 Worker 重新核验。
+  共享托管平台地址不能被人工当成产品官方文档站点批准。歧义由精确
+  `SOURCE_REVIEW` Command 提供人工批准、排除或候选 URL，普通 RESUME 不替代批准。
+  人工批准只解决来源归属，不代表页面内容或具体断言已核验。
+- `tool_invocations`、`source_candidates`、`source_documents`、`source_claim_links`、
+  `source_decisions` 为 v12 持久事实。工具请求先登记并计入预算，结果写入时再次核验
+  owner/epoch；崩溃后允许重复外部只读调用，但已提交事实按参数复用。不把页面全文、
+  Prompt 或密钥复制到 Graph State、普通日志、Snapshot 或证据索引。
+- 新 Run 的 quality 在 deterministic 后、rubric 前做独立来源断言审核；旧 Run
+  继续原三层。只有当前 Lesson 的来源 Gate 对已准入页面及支持片段通过，
+  `QualitySummary` 才能移除对应“未核验事实来源”限制。事实证据不足、冲突、
+  清单不完整或学生正文泄漏内部来源状态时等待人工，不能靠删提示词冒充通过。
+  Humanizer 和构建检查都不能证明事实，未执行的构建不得标为通过。
+- `GET /api/v0/runs/{run_id}/sources` 只读公开候选、文档版本/hash 和断言关联状态，
+  不返回页面全文；复核读模型只将已尝试核验且适合人工判断的候选呈现为可操作项，
+  其余检索记录默认收起。`SOURCE_REVIEW retry_search` 绑定当前 checkpoint，每 Run
+  最多 2 次，仍受 Provider/工具预算约束；拒绝候选不自动重跑。批准须携精确候选、
+  元数据 hash 与人工依据，排除和补充 URL 不强制填写长说明。证据不足时继续等待，
+  不得靠界面隐藏候选放行。release 与 publish 仍独立由人决定；旧发布课程保持原样。
 
 ## Run 状态订阅
 

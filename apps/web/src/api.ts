@@ -53,6 +53,7 @@ export type V0Run = {
   course_id: string | null;
   constraints_version: number;
   source_evidence_version: number;
+  planning_loop_version: number;
   revision: number;
   artifacts: ArtifactSummary[];
   course_input: CourseInput;
@@ -347,7 +348,9 @@ export const api = {
   evidence: (id: string) => request<DeliveryEvidence>(`/api/v0/runs/${encodeURIComponent(id)}/evidence`),
   events: (id: string) => request<{ items: RunEvent[] }>(`/api/v0/runs/${encodeURIComponent(id)}/events`),
   stopRun: (id: string, key: string) => post<ExecutionCommand>(`/api/v0/runs/${encodeURIComponent(id)}/stop`, {}, key),
-  resumeRun: (id: string, key: string) => post<ExecutionCommand>(`/api/v0/runs/${encodeURIComponent(id)}/resume`, {}, key),
+  resumeRun: (id: string, key: string, payload?: {
+    expected_checkpoint_id?: string; blueprint_ref?: ArtifactRef;
+  }) => post<ExecutionCommand>(`/api/v0/runs/${encodeURIComponent(id)}/resume`, payload ?? {}, key),
   reviseRun: (id: string, text: string, checkpoint: string, key: string, providerLimit?: number) =>
     post<ExecutionCommand>(`/api/v0/runs/${encodeURIComponent(id)}/revise`, {
       text, expected_checkpoint_id: checkpoint,

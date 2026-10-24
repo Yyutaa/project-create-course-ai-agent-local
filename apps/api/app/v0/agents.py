@@ -143,12 +143,16 @@ class AgentExecutor:
         inputs: list[AgentInput] | None = None,
         source_runtime=None,
         topic: str | None = None,
+        planning_goal: str | None = None,
     ) -> BaseModel:
         definition = AGENT_DEFINITIONS[role]
         references = list(source_refs or [])
         if inputs is not None:
             expected = ("intake",) if role == "mission" else definition.input_kinds
-            if tuple(item.kind for item in inputs) != expected:
+            kinds = tuple(item.kind for item in inputs)
+            if kinds != expected and not (
+                role == "blueprint" and kinds == ("mission", "blueprint")
+            ):
                 raise ProviderError(f"{role} 的 Context Pack 输入不完整或顺序错误")
             for item in inputs:
                 if item.reference is not None:
@@ -174,7 +178,7 @@ class AgentExecutor:
         request = AgentRequest(
             role=role,
             run_id=run_id,
-            goal=definition.goal,
+            goal=planning_goal if role == "blueprint" and planning_goal else definition.goal,
             instructions=[*definition.skill_slices, *definition.refusal_conditions],
             inputs=inputs,
             output_schema=definition.output_model.model_json_schema(),

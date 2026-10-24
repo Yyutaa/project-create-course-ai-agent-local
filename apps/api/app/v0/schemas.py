@@ -59,6 +59,7 @@ class LoopCounts(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     batch_iterations: int = Field(default=0, ge=0)
+    blueprint_replans: int = Field(default=0, ge=0, le=1)
     repair_attempts: int = Field(default=0, ge=0)
     finding_attempts: dict[str, int] = Field(default_factory=dict)
 
@@ -347,6 +348,7 @@ class V0Run(BaseModel):
     course_input: CourseInput
     constraints_version: int = Field(default=0, ge=0, le=1)
     source_evidence_version: int = Field(default=0, ge=0, le=1)
+    planning_loop_version: int = Field(default=0, ge=0, le=1)
     revision: int = 0
     artifacts: list[ArtifactSummary] = Field(default_factory=list)
     status: RunStatus = "running"

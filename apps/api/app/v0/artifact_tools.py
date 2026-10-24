@@ -46,7 +46,8 @@ class ArtifactTools:
         if "read_artifact" not in definition.allowed_tools:
             raise ToolPermissionError(f"{role} 无权读取 Artifact")
         if reference.kind not in definition.input_kinds and not (
-            role == "mission" and reference.kind == "mission"
+            (role == "mission" and reference.kind == "mission")
+            or (role == "blueprint" and reference.kind == "blueprint")
         ):
             raise ToolPermissionError(f"{role} 无权读取 {reference.kind} Artifact")
         if reference.run_id != run_id:
@@ -77,7 +78,8 @@ class ArtifactTools:
             raise ToolPermissionError(f"{role} 无权写入 {kind} Artifact")
         kinds = tuple(reference.kind for reference in source_refs)
         if kinds != definition.input_kinds and not (
-            role == "mission" and kinds == ("mission",)
+            (role == "mission" and kinds == ("mission",))
+            or (role == "blueprint" and kinds == ("mission", "blueprint"))
         ):
             raise ToolPermissionError(f"{role} 的输入 Artifact 不完整或顺序错误")
 

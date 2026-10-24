@@ -166,7 +166,8 @@ def test_resume_accepts_exact_blueprint_chapter_deviation_once(tmp_path):
     )
     with facts.connect() as connection:
         connection.execute(
-            "UPDATE runs SET mission_review_required=0, source_evidence_version=0 "
+            "UPDATE runs SET mission_review_required=0, source_evidence_version=0, "
+            "planning_loop_version=0 "
             "WHERE id=?", (run.id,)
         )
         connection.execute("DELETE FROM snapshots WHERE run_id=?", (run.id,))
