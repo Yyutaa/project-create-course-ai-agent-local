@@ -5,6 +5,8 @@ The catalog records every numbered Humanizer pattern, including its duplicate 26
 """
 
 from dataclasses import dataclass
+from hashlib import sha256
+import json
 from typing import Literal
 
 
@@ -137,6 +139,23 @@ SKILL_RULE_SETS = {
     role: tuple(rule.id for rule in RULE_CATALOG if role in rule.roles)
     for role in ("mission", "blueprint", "writer", "reviewer", "repair")
 }
+
+RULE_CATALOG_VERSION = sha256(
+    json.dumps(
+        [
+            {
+                "id": rule.id,
+                "text": rule.text,
+                "roles": sorted(rule.roles),
+                "source_section": rule.source_section,
+            }
+            for rule in RULE_CATALOG
+        ],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()[:16]
 
 
 def rule_ids_for(role: RuleRole) -> tuple[str, ...]:
