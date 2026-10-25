@@ -239,6 +239,10 @@ class Worker:
             state = self._resume_state(run_id)
             if state is None:
                 return
+            retry_override = (
+                state.current_node
+                if command.payload.get("action") == "retry" else None
+            )
             checkpoint = self.execution.last_checkpoint(run_id)
             recovery_effect = (
                 self.execution.event(run_id, checkpoint["event_id"])
@@ -249,6 +253,7 @@ class Worker:
                     run_id, state=state, execution=self.execution,
                     owner=self.owner, epoch=epoch,
                     recovery_effect=recovery_effect, command_id=command.id,
+                    retry_override_node=retry_override,
                 )
             except StopRequested:
                 self._mark_stopped(run_id, epoch)

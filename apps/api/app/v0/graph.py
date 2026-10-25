@@ -8,7 +8,7 @@ from app.v0.batching import assign_blueprint_ids, build_batch_plan, complete_bat
 from app.v0.context import ContextBudgetError, ContextPackBuilder
 from app.v0.context_contracts import RepairPackV1
 from app.v0.budget import BudgetExceeded, RetryStopped
-from app.v0.sensitive import safe_error
+from app.v0.sensitive import is_reviewer_schema_error, safe_error
 from app.v0.provider import AgentInput, ProviderError, TransientProviderError
 from app.v0.quality_loop import (
     GateReport,
@@ -224,12 +224,14 @@ class WorkflowNodes:
         try:
             return action(state, index)
         except GraphRouteError:
+            self.runner._failure_class = "deterministic"
             return {
                 "current_node": stage,
                 "last_outcome": "unknown",
                 "exit_reason": "invalid_graph_state",
             }
         except (ContextBudgetError, BudgetExceeded) as error:
+            self.runner._failure_class = None
             self.runner._mark_waiting(state.run_id, index, str(error))
             return {
                 "current_node": stage,
@@ -237,6 +239,7 @@ class WorkflowNodes:
                 "exit_reason": error.code,
             }
         except TokenPreflightError as error:
+            self.runner._failure_class = None
             self.runner._mark_waiting(state.run_id, index, error.code)
             return {
                 "current_node": stage,
@@ -244,6 +247,7 @@ class WorkflowNodes:
                 "exit_reason": error.code,
             }
         except RetryStopped as error:
+            self.runner._failure_class = None
             self.runner._mark_waiting(state.run_id, index, error.code)
             return {
                 "current_node": stage,
@@ -254,8 +258,10 @@ class WorkflowNodes:
             if stage not in ("mission", "blueprint") or (
                 self.runner.get(state.run_id).planning_loop_version != 1
             ):
+                self.runner._failure_class = "transient"
                 self.runner._mark_failed(state.run_id, index, safe_error(error))
                 return {"current_node": stage, "last_outcome": "failed"}
+            self.runner._failure_class = None
             reason = f"provider_transient_exhausted_{error.reason}"
             self.runner._mark_waiting(state.run_id, index, reason)
             return {
@@ -263,8 +269,14 @@ class WorkflowNodes:
                 "exit_reason": reason,
             }
         except (ProviderError, ValueError) as error:
+            self.runner._failure_class = (
+                "transient"
+                if stage == "quality" and is_reviewer_schema_error(str(error))
+                else "deterministic"
+            )
             self.runner._mark_failed(state.run_id, index, safe_error(error))
         except Exception:
+            self.runner._failure_class = "unknown"
             self.runner._mark_failed(
                 state.run_id,
                 index,
@@ -1469,7 +1481,19 @@ def build_graph(
     builder = StateGraph(GraphState)
     def instrument(name, action):
         def invoke(state: GraphState) -> dict:
-            runner._node_started(name, state)
+            decision = runner._node_started(name, state)
+            if decision.action == "reuse" and decision.reused_state is not None:
+                return decision.reused_state.model_dump(exclude={"run_id"})
+            if decision.action == "blocked":
+                runner._mark_waiting(
+                    state.run_id, runner.stage_index(name),
+                    decision.reason or "node_blocked",
+                )
+                return {
+                    "current_node": name,
+                    "last_outcome": "waiting_for_human",
+                    "exit_reason": decision.reason or "node_blocked",
+                }
             effect = runner._recovery_effect
             if name == "quality" and effect and effect["type"] in (
                 "artifact.created", "stage.succeeded"

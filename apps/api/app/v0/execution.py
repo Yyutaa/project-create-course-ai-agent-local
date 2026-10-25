@@ -995,6 +995,16 @@ class ExecutionStore:
             ).fetchone()
             return bool(row and row["stop_requested"])
 
+    def human_input_state(self, run_id: str) -> dict | None:
+        with self.facts.connect() as connection:
+            row = connection.execute(
+                "SELECT revision, human_input_json FROM run_controls WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+        if row is None or not row["human_input_json"]:
+            return None
+        return {"revision": row["revision"], "text": row["human_input_json"]}
+
     def record_revision(self, command: Command, owner: str, epoch: int) -> None:
         text = command.payload.get("text")
         expected = command.payload.get("expected_checkpoint_id")

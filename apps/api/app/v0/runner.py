@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from hashlib import sha256
 import json
 from threading import Lock
+from typing import Literal
 from uuid import uuid4
 
 from app.catalog import CourseSummary, write_course
 from app.v0 import publishing
 from app.v0.agents import AGENT_DEFINITIONS, AgentExecutor
 from app.v0.artifact_tools import ArtifactTools
+from app.v0.execution import StopRequested
+from app.v0.node_inputs import build_node_input_hash
 from app.v0.provider import Provider
 from app.v0.schemas import (
     STAGES,
@@ -30,6 +34,13 @@ V0_QUALITY_LIMITATIONS = (
     "未执行完整课程量规",
     "未执行完整 Humanizer 评分",
 )
+
+
+@dataclass(frozen=True)
+class NodeStartDecision:
+    action: Literal["execute", "reuse", "blocked"]
+    reused_state: GraphState | None = None
+    reason: str | None = None
 
 
 class V0Runner:
@@ -60,6 +71,8 @@ class V0Runner:
         self._execution_state = None
         self._execution_resume = False
         self._recovery_effect = None
+        self._retry_override_node: str | None = None
+        self._failure_class: str | None = None
         if store is not None:
             store.migrate()
         self.artifact_tools = ArtifactTools(AGENT_DEFINITIONS, self._load_artifact)
@@ -279,6 +292,7 @@ class V0Runner:
         execution=None, owner: str | None = None, epoch: int | None = None,
         recovery_effect: dict | None = None,
         command_id: str | None = None,
+        retry_override_node: str | None = None,
     ) -> None:
         from app.v0.graph import build_graph
 
@@ -288,6 +302,7 @@ class V0Runner:
         self._execution_command_id = command_id
         self._execution_resume = state is not None
         self._recovery_effect = recovery_effect
+        self._retry_override_node = retry_override_node
         try:
             build_graph(self).invoke(
                 state or GraphState(run_id=run_id),
@@ -302,10 +317,13 @@ class V0Runner:
             self._execution_state = None
             self._execution_resume = False
             self._recovery_effect = None
+            self._retry_override_node = None
+            self._failure_class = None
 
-    def _node_started(self, node: str, state: GraphState) -> None:
+    def _node_started(self, node: str, state: GraphState) -> NodeStartDecision:
+        self._failure_class = None
         if self._execution is None:
-            return
+            return NodeStartDecision(action="execute")
         checkpoint = state.model_copy(
             update={"current_node": node, "last_outcome": "pending", "exit_reason": None}
         )
@@ -313,35 +331,108 @@ class V0Runner:
             "quality" if node in ("repair", "verification") else node
         ):
             self._recovery_effect = None
-        self._execution_attempt = self._execution.start_node(
+        run = self.get(state.run_id)
+        if run.context_contract_version != 1:
+            self._execution_attempt = self._execution.start_node(
+                state.run_id, node, checkpoint,
+                self._execution_owner, self._execution_epoch,
+                self._recovery_effect["id"] if self._recovery_effect else None,
+                self._execution_command_id,
+            )
+            self._bind_node_execution(self._execution_attempt)
+            self._execution_state = checkpoint
+            return NodeStartDecision(action="execute")
+        input_hash = None
+        if run.context_contract_version == 1:
+            review = (
+                self.store.latest_mission_review(state.run_id)
+                if self.store is not None else None
+            )
+            mission_review = (
+                {
+                    key: review[key]
+                    for key in (
+                        "action", "feedback", "artifact_id",
+                        "artifact_version", "content_hash",
+                    )
+                }
+                if review is not None else None
+            )
+            source_summary = (
+                self.source_runtime.facts.summary_pack(state.run_id)
+                if self.source_runtime is not None
+                and run.source_evidence_version == 1
+                else None
+            )
+            human_input = (
+                self._execution.human_input_state(state.run_id)
+                if hasattr(self._execution, "human_input_state") else None
+            )
+            input_hash = build_node_input_hash(
+                node=node, run=run, state=checkpoint,
+                mission_review=mission_review,
+                source_summary=source_summary,
+                human_input=human_input,
+                provider=self.provider,
+            )
+        claim = self._execution.claim_node_execution(
             state.run_id, node, checkpoint,
             self._execution_owner, self._execution_epoch,
-            self._recovery_effect["id"] if self._recovery_effect else None,
-            self._execution_command_id,
+            input_hash=input_hash,
+            reuse_enabled=(
+                run.context_contract_version == 1
+                and self._recovery_effect is None
+            ),
+            retry_override=self._retry_override_node == node,
+            recovery_event_id=(
+                self._recovery_effect["id"] if self._recovery_effect else None
+            ),
+            command_id=self._execution_command_id,
         )
+        if claim.outcome == "reused":
+            return NodeStartDecision(
+                action="reuse", reused_state=claim.after_state,
+            )
+        if claim.outcome == "busy":
+            return NodeStartDecision(action="blocked", reason="node_busy")
+        if claim.outcome == "blocked":
+            if claim.reason == "stop_requested":
+                raise StopRequested("STOP 已受理，禁止开始下一节点")
+            return NodeStartDecision(
+                action="blocked", reason=claim.reason or "node_blocked",
+            )
+        self._execution_attempt = claim.execution_id
+        self._bind_node_execution(self._execution_attempt)
+        self._execution_state = checkpoint
+        return NodeStartDecision(action="execute")
+
+    def _bind_node_execution(self, execution_id: str | None) -> None:
         if hasattr(self.provider, "node_execution_id"):
-            self.provider.node_execution_id = self._execution_attempt
+            self.provider.node_execution_id = execution_id
         if self.source_runtime is not None:
             self.source_runtime.bind(
                 self._execution_owner, self._execution_epoch,
-                self._execution_command_id, self._execution_attempt,
+                self._execution_command_id, execution_id,
             )
-        self._execution_state = checkpoint
 
     def _node_finished(self, state: GraphState, result: dict) -> None:
         if self._execution is None:
             return
         updated = self._execution_state.model_copy(update=result)
         failed = result.get("last_outcome") in ("failed", "unknown")
+        failure_class = self._failure_class
+        if failed and failure_class is None:
+            failure_class = "business"
         self._execution.finish_node(
             self._execution_attempt, updated, self._execution_owner,
             self._execution_epoch, failed=failed,
             error=result.get("exit_reason") if failed else None,
+            failure_class=failure_class,
         )
         self._execution_attempt = None
-        if hasattr(self.provider, "node_execution_id"):
-            self.provider.node_execution_id = None
+        self._bind_node_execution(None)
         self._execution_state = None
+        self._failure_class = None
         self._recovery_effect = None
 
     @staticmethod
