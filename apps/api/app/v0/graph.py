@@ -1476,6 +1476,7 @@ def build_graph(
     *,
     release_decision: ReleaseDecision | None = None,
     request_key: str | None = None,
+    checkpointer=None,
 ):
     nodes = WorkflowNodes(runner, release_decision, request_key)
     builder = StateGraph(GraphState)
@@ -1565,4 +1566,6 @@ def build_graph(
     builder.add_conditional_edges("verification", route_after_verification)
     builder.add_conditional_edges("release", route_after_release)
     builder.add_edge("route_error", END)
+    if checkpointer is not None:
+        return builder.compile(checkpointer=checkpointer)
     return builder.compile()

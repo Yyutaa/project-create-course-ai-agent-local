@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+from pathlib import Path
 from threading import Lock
 from typing import Literal
 from uuid import uuid4
@@ -12,6 +13,11 @@ from app.v0 import publishing
 from app.v0.agents import AGENT_DEFINITIONS, AgentExecutor
 from app.v0.artifact_tools import ArtifactTools
 from app.v0.execution import StopRequested
+from app.v0.langgraph_checkpoint import (
+    checkpoint_path,
+    graph_config,
+    open_checkpointer,
+)
 from app.v0.node_inputs import build_node_input_hash
 from app.v0.provider import Provider
 from app.v0.schemas import (
@@ -52,6 +58,8 @@ class V0Runner:
         published_root=None,
         catalog_path=None,
         source_runtime=None,
+        langgraph_checkpoint_path: Path | None = None,
+        langgraph_checkpointer=None,
     ):
         from app.catalog import CATALOG_PATH, PUBLISHED_ROOT
 
@@ -60,6 +68,17 @@ class V0Runner:
         self.published_root = published_root or PUBLISHED_ROOT
         self.catalog_path = catalog_path or CATALOG_PATH
         self.source_runtime = source_runtime
+        if langgraph_checkpointer is not None:
+            self.langgraph_checkpointer = langgraph_checkpointer
+            self.langgraph_checkpoint_path = None
+        else:
+            self.langgraph_checkpointer = None
+            if langgraph_checkpoint_path is not None:
+                self.langgraph_checkpoint_path = Path(langgraph_checkpoint_path)
+            elif store is not None and getattr(store, "path", None) is not None:
+                self.langgraph_checkpoint_path = checkpoint_path(store.path)
+            else:
+                self.langgraph_checkpoint_path = None
         self._runs: dict[str, V0Run] = {}
         self._memory_artifacts: dict[tuple[str, int], ArtifactRecord] = {}
         self._lock = Lock()
@@ -287,6 +306,30 @@ class V0Runner:
             )
         return refs
 
+    def _invoke_graph(
+        self, run_id: str, state: GraphState, *,
+        release_decision=None, request_key=None,
+    ):
+        from app.v0.graph import build_graph
+
+        if self.langgraph_checkpointer is not None:
+            graph = build_graph(
+                self, release_decision=release_decision,
+                request_key=request_key,
+                checkpointer=self.langgraph_checkpointer,
+            )
+            return graph.invoke(state, config=graph_config(run_id))
+        if self.langgraph_checkpoint_path is not None:
+            with open_checkpointer(self.langgraph_checkpoint_path) as saver:
+                graph = build_graph(
+                    self, release_decision=release_decision,
+                    request_key=request_key, checkpointer=saver,
+                )
+                return graph.invoke(state, config=graph_config(run_id))
+        return build_graph(
+            self, release_decision=release_decision, request_key=request_key,
+        ).invoke(state, config={"recursion_limit": 100})
+
     def execute(
         self, run_id: str, *, state: GraphState | None = None,
         execution=None, owner: str | None = None, epoch: int | None = None,
@@ -294,8 +337,6 @@ class V0Runner:
         command_id: str | None = None,
         retry_override_node: str | None = None,
     ) -> None:
-        from app.v0.graph import build_graph
-
         self._execution = execution
         self._execution_owner = owner
         self._execution_epoch = epoch
@@ -304,9 +345,8 @@ class V0Runner:
         self._recovery_effect = recovery_effect
         self._retry_override_node = retry_override_node
         try:
-            build_graph(self).invoke(
-                state or GraphState(run_id=run_id),
-                config={"recursion_limit": 100},
+            self._invoke_graph(
+                run_id, state or GraphState(run_id=run_id),
             )
         finally:
             self._execution = None
@@ -473,14 +513,15 @@ class V0Runner:
             replay = self.store.release_replay(run_id, request_key, decision)
             if replay is not None:
                 return replay
-        from app.v0.graph import build_graph
-
-        build_graph(self, release_decision=decision, request_key=request_key).invoke(
+        self._invoke_graph(
+            run_id,
             GraphState(
                 run_id=run_id,
                 current_node="release",
                 approval_status=decision.action,
-            )
+            ),
+            release_decision=decision,
+            request_key=request_key,
         )
         return self.get(run_id)
 
