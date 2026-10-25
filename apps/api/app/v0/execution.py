@@ -333,6 +333,29 @@ class ExecutionStore:
                 (status, error[:200] if error else None, _utc().isoformat(), command_id),
             )
 
+    @staticmethod
+    def _gate_checkpoint(connection, run, expected: str) -> dict | None:
+        if run.langgraph_flow_version == 1:
+            row = connection.execute(
+                "SELECT id, waiting_state_json "
+                "FROM node_executions WHERE run_id=? AND status='WAITING' "
+                "AND waiting_state_json IS NOT NULL "
+                "AND (id=? OR pending_interrupt_id=?) "
+                "ORDER BY rowid DESC LIMIT 1",
+                (run.id, expected, expected),
+            ).fetchone()
+            if row is not None:
+                return {
+                    "id": row["id"], "node_execution_id": row["id"],
+                    "position": "after_node",
+                    "state_json": row["waiting_state_json"],
+                }
+        return connection.execute(
+            "SELECT id, node_execution_id, position, state_json "
+            "FROM checkpoints WHERE run_id=? ORDER BY rowid DESC LIMIT 1",
+            (run.id,),
+        ).fetchone()
+
     def apply_mission_review(
         self, command: Command, owner: str, epoch: int
     ) -> dict:
@@ -378,10 +401,7 @@ class ExecutionStore:
                 run.stages[1].status != "waiting_for_human"
             ):
                 raise ValueError("Run 未等待 Mission 人工确认")
-            checkpoint = connection.execute(
-                "SELECT id, position FROM checkpoints WHERE run_id=? "
-                "ORDER BY rowid DESC LIMIT 1", (command.run_id,),
-            ).fetchone()
+            checkpoint = self._gate_checkpoint(connection, run, expected)
             if (
                 checkpoint is None or checkpoint["id"] != expected
                 or checkpoint["position"] != "after_node"
@@ -497,10 +517,7 @@ class ExecutionStore:
                     "replayed": True,
                 }
             run = self.facts._get_run(connection, command.run_id)
-            checkpoint = connection.execute(
-                "SELECT id, position, state_json FROM checkpoints WHERE run_id=? "
-                "ORDER BY rowid DESC LIMIT 1", (command.run_id,),
-            ).fetchone()
+            checkpoint = self._gate_checkpoint(connection, run, expected)
             if (
                 checkpoint is None or checkpoint["id"] != expected
                 or checkpoint["position"] != "after_node"
@@ -656,12 +673,7 @@ class ExecutionStore:
             if replay:
                 return {**dict(replay), "replayed": True}
             run = self.facts._get_run(connection, command.run_id)
-            checkpoint = connection.execute(
-                "SELECT id, node_execution_id, position, state_json FROM checkpoints "
-                "WHERE run_id=? "
-                "ORDER BY rowid DESC LIMIT 1",
-                (command.run_id,),
-            ).fetchone()
+            checkpoint = self._gate_checkpoint(connection, run, expected)
             if (
                 checkpoint is None or checkpoint["id"] != expected
                 or checkpoint["position"] != "after_node"
@@ -1059,11 +1071,11 @@ class ExecutionStore:
             connection.execute(
                 "UPDATE node_executions SET status='WAITING', "
                 "after_checkpoint_id=?, error=?, lease_epoch=?, "
-                "failure_class=NULL, pending_interrupt_id=?, updated_at=? "
-                "WHERE id=?",
+                "failure_class=NULL, pending_interrupt_id=?, "
+                "waiting_state_json=?, updated_at=? WHERE id=?",
                 (
                     checkpoint_id, reason[:200], epoch, pending_interrupt_id,
-                    _utc().isoformat(), execution_id,
+                    state.model_dump_json(), _utc().isoformat(), execution_id,
                 ),
             )
 
@@ -1093,6 +1105,34 @@ class ExecutionStore:
             "id": row["id"], "type": row["event_type"], "stage": node,
             "artifact_id": row["artifact_id"],
             "artifact_version": row["artifact_version"],
+        }
+
+    def waiting_gate_state(self, run_id: str, expected: str | None = None) -> dict | None:
+        with self.facts.connect() as connection:
+            if expected is None:
+                row = connection.execute(
+                    "SELECT id, node, pending_interrupt_id, waiting_state_json "
+                    "FROM node_executions WHERE run_id=? AND status='WAITING' "
+                    "AND waiting_state_json IS NOT NULL "
+                    "ORDER BY rowid DESC LIMIT 1",
+                    (run_id,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT id, node, pending_interrupt_id, waiting_state_json "
+                    "FROM node_executions WHERE run_id=? AND status='WAITING' "
+                    "AND waiting_state_json IS NOT NULL "
+                    "AND (id=? OR pending_interrupt_id=?) "
+                    "ORDER BY rowid DESC LIMIT 1",
+                    (run_id, expected, expected),
+                ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"], "node_execution_id": row["id"],
+            "position": "after_node", "state_json": row["waiting_state_json"],
+            "pending_interrupt_id": row["pending_interrupt_id"],
+            "node": row["node"],
         }
 
     def waiting_interrupt_id(self, run_id: str) -> str | None:
@@ -1297,16 +1337,19 @@ class ExecutionStore:
         )
 
     def read_model(self, run_id: str) -> ExecutionReadModel:
-        self.facts.get_run(run_id)
+        run = self.facts.get_run(run_id)
         commands = self.list_commands(run_id)
         checkpoint = self.last_checkpoint(run_id)
+        if run.langgraph_flow_version == 1 and run.status == "waiting_for_human":
+            gate = self.waiting_gate_state(run_id)
+            if gate is not None:
+                checkpoint = gate
         node = self.current_node(run_id)
         with self.facts.connect() as connection:
             control = connection.execute(
                 "SELECT stop_requested, revision, human_input_json "
                 "FROM run_controls WHERE run_id=?", (run_id,),
             ).fetchone()
-        run = self.facts.get_run(run_id)
         mission_review = None
         if self.facts.mission_review_required(run_id):
             missions = [

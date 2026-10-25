@@ -91,7 +91,7 @@ def test_mission_gate_interrupts_and_approval_resumes(tmp_path):
     assert current.stages[1].status == "waiting_for_human"
     with facts.connect() as connection:
         execution = connection.execute(
-            "SELECT status, input_hash FROM node_executions "
+            "SELECT id, status, input_hash FROM node_executions "
             "WHERE run_id=? AND node='mission_gate' ORDER BY rowid DESC LIMIT 1",
             (run.id,),
         ).fetchone()
@@ -100,6 +100,7 @@ def test_mission_gate_interrupts_and_approval_resumes(tmp_path):
 
     review = commands.read_model(run.id).mission_review
     assert review is not None and review.status == "pending"
+    assert review.checkpoint_id == execution["id"]
 
     with open_checkpointer(checkpoint_path(facts.path)) as saver:
         graph = build_graph(worker.runner, checkpointer=saver)

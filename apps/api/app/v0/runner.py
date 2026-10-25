@@ -350,7 +350,7 @@ class V0Runner:
 
     def _invoke_compiled(
         self, graph, run_id: str, state: GraphState | None,
-        resume_payload: dict | None,
+        resume_payload: dict | None, resume_graph: bool = False,
     ):
         if resume_payload is not None:
             snapshot = graph.get_state(thread_config(run_id))
@@ -362,6 +362,13 @@ class V0Runner:
             result = graph.invoke(
                 Command(resume=resume_payload), config=graph_config(run_id),
             )
+        elif resume_graph:
+            snapshot = graph.get_state(thread_config(run_id))
+            if snapshot.interrupts:
+                return None
+            if not snapshot.values and not snapshot.next:
+                return None
+            result = graph.invoke(None, config=graph_config(run_id))
         else:
             result = graph.invoke(
                 state or GraphState(run_id=run_id), config=graph_config(run_id),
@@ -419,6 +426,7 @@ class V0Runner:
         self, run_id: str, state: GraphState | None, *,
         release_decision=None, request_key=None,
         resume_payload: dict | None = None,
+        resume_graph: bool = False,
     ):
         from app.v0.graph import build_graph
 
@@ -429,7 +437,7 @@ class V0Runner:
                 checkpointer=self.langgraph_checkpointer,
             )
             return self._invoke_compiled(
-                graph, run_id, state, resume_payload,
+                graph, run_id, state, resume_payload, resume_graph,
             )
         if self.langgraph_checkpoint_path is not None:
             with open_checkpointer(self.langgraph_checkpoint_path) as saver:
@@ -438,9 +446,9 @@ class V0Runner:
                     request_key=request_key, checkpointer=saver,
                 )
                 return self._invoke_compiled(
-                    graph, run_id, state, resume_payload,
+                    graph, run_id, state, resume_payload, resume_graph,
                 )
-        if resume_payload is not None:
+        if resume_payload is not None or resume_graph:
             raise ValueError("LangGraph resume 需要 checkpointer")
         return build_graph(
             self, release_decision=release_decision, request_key=request_key,
@@ -456,20 +464,24 @@ class V0Runner:
         command_id: str | None = None,
         retry_override_node: str | None = None,
         resume_payload: dict | None = None,
+        resume_graph: bool = False,
     ) -> None:
         self._execution = execution
         self._execution_owner = owner
         self._execution_epoch = epoch
         self._execution_command_id = command_id
-        self._execution_resume = state is not None or resume_payload is not None
+        self._execution_resume = (
+            state is not None or resume_payload is not None or resume_graph
+        )
         self._recovery_effect = recovery_effect
         self._retry_override_node = retry_override_node
         try:
             self._invoke_graph(
                 run_id,
-                state if resume_payload is not None
+                state if (resume_payload is not None or resume_graph)
                 else state or GraphState(run_id=run_id),
                 resume_payload=resume_payload,
+                resume_graph=resume_graph,
             )
         finally:
             self._execution = None
