@@ -13,6 +13,7 @@ from app.v0.provider import (
     RealProvider,
 )
 from app.v0.schemas import MissionDraft
+from app.v0.token_preflight import TokenPreflightError
 
 
 def mission_request() -> AgentRequest:
@@ -64,6 +65,39 @@ def test_real_provider_requires_configuration(monkeypatch):
 
     with pytest.raises(ProviderError, match="配置"):
         RealProvider.from_env().invoke(mission_request())
+
+
+def test_new_contract_preflight_rejects_over_budget_without_model_call(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "app.v0.provider.ChatDeepSeek", lambda **kwargs: calls.append(kwargs),
+    )
+    request = mission_request().model_copy(deep=True)
+    request.context_contract_version = 1
+    request.inputs[0].content["topic"] = "状态" * 30_000
+
+    with pytest.raises(TokenPreflightError, match="预算"):
+        RealProvider("https://api.deepseek.com", "deepseek-flash", "test-key").invoke(
+            request
+        )
+    assert calls == []
+
+
+def test_tool_turn_rechecks_appended_untrusted_result_before_next_call(monkeypatch):
+    calls = []
+    monkeypatch.setattr("app.v0.provider.OpenAI", lambda **kwargs: calls.append(kwargs))
+    request = mission_request().model_copy(deep=True)
+    request.role = "blueprint"
+    request.context_contract_version = 1
+
+    with pytest.raises(TokenPreflightError, match="预算"):
+        RealProvider(
+            "https://api.deepseek.com", "deepseek-flash", "test-key",
+        ).next_tool_turn(request, [
+            {"role": "system", "content": "查找官方资料"},
+            {"role": "tool", "tool_call_id": "call-1", "content": "网页" * 30_000},
+        ])
+    assert calls == []
 
 
 def test_real_provider_accepts_existing_repository_environment_names(monkeypatch):

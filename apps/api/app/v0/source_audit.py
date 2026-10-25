@@ -41,6 +41,7 @@ def _result(reference: ArtifactRef, status: str, rule_id: str) -> GateReport:
 def source_gate(
     provider, sources: SourceFacts, reference: ArtifactRef, lesson_id: str,
     markdown: str, owner: str, epoch: int,
+    context_contract_version: int = 0,
 ) -> GateReport:
     for number, line in enumerate(markdown.splitlines(), 1):
         if any(phrase in line for phrase in (
@@ -95,6 +96,7 @@ def source_gate(
             },
         )],
         output_schema=SourceAudit.model_json_schema(),
+        context_contract_version=context_contract_version,
     ))
     if response.role != "reviewer":
         raise ProviderError("来源 Reviewer 返回错误角色")

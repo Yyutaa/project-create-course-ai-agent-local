@@ -80,25 +80,32 @@ class FactStore:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version >= 13:
+            if version >= 14:
+                return
+            if version == 13:
+                self._migrate_v14(connection)
                 return
             if version == 12:
                 self._migrate_v13(connection)
+                self._migrate_v14(connection)
                 return
             if version == 11:
                 self._migrate_v12(connection)
                 self._migrate_v13(connection)
+                self._migrate_v14(connection)
                 return
             if version == 10:
                 self._migrate_v11(connection)
                 self._migrate_v12(connection)
                 self._migrate_v13(connection)
+                self._migrate_v14(connection)
                 return
             if version == 9:
                 self._migrate_v10(connection)
                 self._migrate_v11(connection)
                 self._migrate_v12(connection)
                 self._migrate_v13(connection)
+                self._migrate_v14(connection)
                 return
             if version == 8:
                 self._migrate_v9(connection)
@@ -106,6 +113,7 @@ class FactStore:
                 self._migrate_v11(connection)
                 self._migrate_v12(connection)
                 self._migrate_v13(connection)
+                self._migrate_v14(connection)
                 return
             if version == 7:
                 self._migrate_v8(connection)
@@ -114,6 +122,7 @@ class FactStore:
                 self._migrate_v11(connection)
                 self._migrate_v12(connection)
                 self._migrate_v13(connection)
+                self._migrate_v14(connection)
                 return
             if version == 6:
                 self._migrate_v7(connection)
@@ -123,6 +132,7 @@ class FactStore:
                 self._migrate_v11(connection)
                 self._migrate_v12(connection)
                 self._migrate_v13(connection)
+                self._migrate_v14(connection)
                 return
             if version == 5:
                 self._migrate_v6(connection)
@@ -133,6 +143,7 @@ class FactStore:
                 self._migrate_v11(connection)
                 self._migrate_v12(connection)
                 self._migrate_v13(connection)
+                self._migrate_v14(connection)
                 return
             if version == 4:
                 self._migrate_v5(connection)
@@ -144,6 +155,7 @@ class FactStore:
                 self._migrate_v11(connection)
                 self._migrate_v12(connection)
                 self._migrate_v13(connection)
+                self._migrate_v14(connection)
                 return
             if version == 3:
                 self._migrate_v4(connection)
@@ -156,6 +168,7 @@ class FactStore:
                 self._migrate_v11(connection)
                 self._migrate_v12(connection)
                 self._migrate_v13(connection)
+                self._migrate_v14(connection)
                 return
             if version == 0:
                 connection.execute(
@@ -254,6 +267,7 @@ class FactStore:
             self._migrate_v11(connection)
             self._migrate_v12(connection)
             self._migrate_v13(connection)
+            self._migrate_v14(connection)
 
     @staticmethod
     def _migrate_v4(connection: sqlite3.Connection) -> None:
@@ -509,6 +523,20 @@ class FactStore:
             )
         connection.execute("PRAGMA user_version=13")
 
+    @staticmethod
+    def _migrate_v14(connection: sqlite3.Connection) -> None:
+        has_runs = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'"
+        ).fetchone()
+        if has_runs and "context_contract_version" not in {
+            row["name"] for row in connection.execute("PRAGMA table_info(runs)")
+        }:
+            connection.execute(
+                "ALTER TABLE runs ADD COLUMN context_contract_version "
+                "INTEGER NOT NULL DEFAULT 0 CHECK(context_contract_version IN (0, 1))"
+            )
+        connection.execute("PRAGMA user_version=14")
+
     def mission_review_required(self, run_id: str) -> bool:
         with self.connect() as connection:
             row = connection.execute(
@@ -545,6 +573,7 @@ class FactStore:
                 constraints_version=1,
                 source_evidence_version=1,
                 planning_loop_version=1,
+                context_contract_version=1,
             )
             try:
                 connection.execute(
@@ -554,8 +583,9 @@ class FactStore:
                 connection.execute(
                     "INSERT INTO runs(id, course_id, status, idempotency_key, "
                     "request_hash, created_at, updated_at, mission_review_required, "
-                    "constraints_version, source_evidence_version, planning_loop_version) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, 1, 1)",
+                    "constraints_version, source_evidence_version, planning_loop_version, "
+                    "context_contract_version) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, 1, 1, 1)",
                     (run_id, course_id, "running", request_key, request_hash, now, now),
                 )
                 connection.execute(
@@ -645,7 +675,8 @@ class FactStore:
     def _rebuild(self, connection: sqlite3.Connection, run_id: str) -> V0Run:
         row = connection.execute(
             "SELECT runs.course_id, runs.constraints_version, "
-            "runs.source_evidence_version, runs.planning_loop_version, intakes.topic, "
+            "runs.source_evidence_version, runs.planning_loop_version, "
+            "runs.context_contract_version, intakes.topic, "
             "intakes.audience, intakes.goal, intakes.language, intakes.source_policy, "
             "intakes.expected_chapters, intakes.min_effective_chars, "
             "intakes.token_limit FROM runs JOIN intakes ON intakes.run_id=runs.id "
@@ -676,6 +707,7 @@ class FactStore:
             constraints_version=row["constraints_version"],
             source_evidence_version=row["source_evidence_version"],
             planning_loop_version=row["planning_loop_version"],
+            context_contract_version=row["context_contract_version"],
         )
         events = connection.execute(
             "SELECT * FROM events WHERE run_id=? ORDER BY id", (run_id,)

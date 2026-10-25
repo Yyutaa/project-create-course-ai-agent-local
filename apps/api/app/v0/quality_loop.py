@@ -7,6 +7,7 @@ import re
 from pydantic import ValidationError
 
 from app.v0.provider import AgentInput, AgentRequest, ProviderError
+from app.v0.skill_rules import rules_for
 
 from app.v0.schemas import (
     ArtifactRef,
@@ -170,6 +171,8 @@ def review_gate(
     lesson_id: str,
     markdown: str,
     rubric_inputs: list[AgentInput],
+    *,
+    context_contract_version: int = 0,
 ) -> GateReport:
     """Run the independent Reviewer in one narrowly scoped gate context."""
     if gate not in ("rubric", "humanizer"):
@@ -183,7 +186,7 @@ def review_gate(
             "无法精确定位时返回 manual_review 且不要生成 Finding。",
         ]
     else:
-        inputs = [
+        inputs = rubric_inputs if context_contract_version == 1 else [
             AgentInput(
                 kind="lesson",
                 reference=reference,
@@ -196,6 +199,19 @@ def review_gate(
             "Finding.evidence 必须逐字复制正文单个物理行中的连续文本。",
             "无法精确定位时返回 manual_review 且不要生成 Finding。",
         ]
+    if context_contract_version == 1:
+        projected = (
+            [rule for rule in rules_for("reviewer") if rule.id in (
+                "teach.review", "teach.sources", "teaching.practice",
+            )]
+            if gate == "rubric" else [
+                rule for rule in rules_for("reviewer")
+                if rule.id.startswith("humanizer.")
+            ]
+        )
+        instructions = [
+            f"{rule.id}: {rule.text}" for rule in projected
+        ] + instructions
     response = runner.provider.invoke(
         AgentRequest(
             role="reviewer",
@@ -204,6 +220,7 @@ def review_gate(
             instructions=instructions,
             inputs=inputs,
             output_schema=QualitySummary.model_json_schema(),
+            context_contract_version=context_contract_version,
         )
     )
     if response.role != "reviewer":

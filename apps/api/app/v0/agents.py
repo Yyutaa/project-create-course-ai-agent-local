@@ -15,7 +15,9 @@ from app.v0.schemas import (
     MissionDraft,
     QualitySummary,
     ArtifactRef,
+    WriterLessonDraftV1,
 )
+from app.v0.skill_rules import repair_rules_for, rules_for
 
 
 ToolName = Literal["read_artifact", "write_candidate_artifact"]
@@ -144,6 +146,8 @@ class AgentExecutor:
         source_runtime=None,
         topic: str | None = None,
         planning_goal: str | None = None,
+        context_contract_version: int = 0,
+        repair_rule_id: str | None = None,
     ) -> BaseModel:
         definition = AGENT_DEFINITIONS[role]
         references = list(source_refs or [])
@@ -152,6 +156,9 @@ class AgentExecutor:
             kinds = tuple(item.kind for item in inputs)
             if kinds != expected and not (
                 role == "blueprint" and kinds == ("mission", "blueprint")
+            ) and not (
+                context_contract_version == 1
+                and role == "repair" and kinds == ("lesson", "quality")
             ):
                 raise ProviderError(f"{role} 的 Context Pack 输入不完整或顺序错误")
             for item in inputs:
@@ -175,13 +182,32 @@ class AgentExecutor:
                     )
                 )
 
+        if context_contract_version == 1:
+            if role == "repair":
+                if not repair_rule_id:
+                    raise ProviderError("Repair 缺少当前 Finding 规则")
+                scoped_rules = repair_rules_for(repair_rule_id)
+            else:
+                scoped_rules = rules_for(role)
+            instructions = [
+                *(rule.text for rule in scoped_rules),
+                *definition.refusal_conditions,
+            ]
+        else:
+            instructions = [*definition.skill_slices, *definition.refusal_conditions]
+        output_model = (
+            WriterLessonDraftV1
+            if context_contract_version == 1 and role == "writer"
+            else definition.output_model
+        )
         request = AgentRequest(
             role=role,
             run_id=run_id,
             goal=planning_goal if role == "blueprint" and planning_goal else definition.goal,
-            instructions=[*definition.skill_slices, *definition.refusal_conditions],
+            instructions=instructions,
             inputs=inputs,
-            output_schema=definition.output_model.model_json_schema(),
+            output_schema=output_model.model_json_schema(),
+            context_contract_version=context_contract_version,
         )
         if source_runtime is not None:
             if role not in ("blueprint", "writer") or not topic:
@@ -196,7 +222,7 @@ class AgentExecutor:
         if response.role != role:
             raise ProviderError(f"{role} Provider 返回了错误角色 {response.role}")
         try:
-            return definition.output_model.model_validate(response.payload)
+            return output_model.model_validate(response.payload)
         except ValidationError as error:
             issue = error.errors()[0]
             path = ".".join(str(part) for part in issue["loc"]) or "根节点"

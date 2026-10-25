@@ -255,6 +255,8 @@ class BudgetedProvider:
         self.owner, self.epoch, self.command_id = owner, epoch, command_id
 
     def invoke(self, request: AgentRequest) -> AgentResponse:
+        if request.context_contract_version == 1 and hasattr(self.provider, "preflight"):
+            self.provider.preflight(request)
         return self._call(
             request, lambda: self.provider.invoke(request), lambda value: value,
         )
@@ -320,6 +322,8 @@ class BudgetedProvider:
     def next_tool_turn(
         self, request: AgentRequest, messages: list[dict]
     ) -> ToolTurn:
+        if request.context_contract_version == 1 and hasattr(self.provider, "preflight"):
+            self.provider.preflight(request, messages)
         return self._call(
             request,
             lambda: self.provider.next_tool_turn(request, messages),

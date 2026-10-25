@@ -10,6 +10,7 @@ from app.v0.worker import Worker
 from app.v0.execution import ExecutionStore
 from app.v0.schemas import CourseInput
 from app.v0.storage import FactStore
+from app.v0.token_preflight import TokenPreflightError
 
 
 class TurnProvider:
@@ -27,6 +28,45 @@ class FlakyProvider:
             self.remaining -= 1
             raise TransientProviderError(self.failure)
         return AgentResponse(role=request.role, payload={})
+
+
+def test_preflight_rejection_does_not_reserve_a_provider_call(tmp_path):
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(CourseInput(
+        topic="Vue", audience="初学者", goal="理解状态", language="zh",
+    ), "preflight-reject")
+    expires = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+    with facts.connect() as connection:
+        connection.execute(
+            "INSERT INTO run_leases(run_id, owner, epoch, expires_at) "
+            "VALUES (?, 'worker-a', 1, ?)", (run.id, expires),
+        )
+
+    class RejectingProvider:
+        calls = 0
+
+        def preflight(self, request, messages=None):
+            raise TokenPreflightError("最终消息超过 Token 预算")
+
+        def invoke(self, request):
+            self.calls += 1
+            return AgentResponse(role=request.role, payload={})
+
+    raw = RejectingProvider()
+    provider = BudgetedProvider(raw, BudgetStore(facts.path))
+    provider.bind("worker-a", 1, "command-1")
+    request = AgentRequest(
+        role="mission", run_id=run.id, context_contract_version=1,
+        goal="任务定义", instructions=["请规划"],
+        inputs=[AgentInput(kind="intake", content={"topic": "Vue"})],
+        output_schema={},
+    )
+
+    with pytest.raises(TokenPreflightError):
+        provider.invoke(request)
+    assert raw.calls == 0
+    assert BudgetStore(facts.path).summary(run.id).used == 0
 
 
 def inside_graph(call):

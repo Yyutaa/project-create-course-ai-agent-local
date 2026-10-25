@@ -44,10 +44,11 @@ def execute_legacy(runner: V0Runner, run_id: str) -> None:
     run = runner.get(run_id)
     run.constraints_version = 0
     run.source_evidence_version = 0
+    run.context_contract_version = 0
     with runner.store.connect() as connection:
         connection.execute(
             "UPDATE runs SET mission_review_required=0, constraints_version=0, "
-            "source_evidence_version=0 WHERE id=?",
+            "source_evidence_version=0, context_contract_version=0 WHERE id=?",
             (run_id,),
         )
         connection.execute(
@@ -60,9 +61,11 @@ def execute_legacy(runner: V0Runner, run_id: str) -> None:
 def disable_source_evidence(runner: V0Runner, run_id: str) -> None:
     run = runner.get(run_id)
     run.source_evidence_version = 0
+    run.context_contract_version = 0
     with runner.store.connect() as connection:
         connection.execute(
-            "UPDATE runs SET source_evidence_version=0 WHERE id=?", (run_id,),
+            "UPDATE runs SET source_evidence_version=0, context_contract_version=0 "
+            "WHERE id=?", (run_id,),
         )
         connection.execute(
             "UPDATE snapshots SET projection_json=? WHERE run_id=?",
@@ -585,6 +588,111 @@ def test_two_batches_update_ledger_and_pass_previous_summary(tmp_path):
         second_batch_first.inputs[2].content["previous_lesson_summary"]
         == "已完成第 3 章。"
     )
+
+
+def test_new_run_repairs_only_current_humanizer_finding_and_verifies(tmp_path):
+    class CurrentFindingProvider(FakeProvider):
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+            self.humanizer_calls = 0
+
+        def invoke(self, request):
+            self.requests.append(request)
+            if request.role == "reviewer" and request.goal.startswith("humanizer"):
+                self.humanizer_calls += 1
+                if self.humanizer_calls == 1:
+                    return AgentResponse(role="reviewer", payload={
+                        "status": "manual_review", "checks": ["有填充句"],
+                        "findings": [{
+                            "code": "humanizer.language.filler", "category": "language",
+                            "severity": "minor", "evidence": "变量保存一个值",
+                            "recommendation": "删去空泛句并保留事实",
+                        }],
+                        "language_risk": "需修订", "limitations": ["表达问题"],
+                    })
+            if request.role == "repair":
+                return AgentResponse(role="repair", payload={
+                    "title": "Python 变量入门",
+                    "markdown": "变量可以保存并更新一个值。练习：修改变量并观察输出。",
+                })
+            return super().invoke(request)
+
+    provider = CurrentFindingProvider()
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    runner = V0Runner(provider, store=facts)
+    created = runner.create(CourseInput(
+        topic="Python 变量", audience="初学者", goal="解释变量", language="zh",
+        expected_chapters=1, min_effective_chars=1,
+    ), request_key="new-role-pack")
+    with facts.connect() as connection:
+        connection.execute(
+            "UPDATE runs SET mission_review_required=0, source_evidence_version=0 "
+            "WHERE id=?", (created.id,),
+        )
+        connection.execute("DELETE FROM snapshots WHERE run_id=?", (created.id,))
+
+    runner.execute(created.id)
+    result = runner.get(created.id)
+
+    assert result.stages[5].status == "succeeded"
+    assert result.stages[6].status == "waiting_for_human"
+    assert result.batch_plan.continuity_ledger == []
+    assert result.batch_plan.continuity_ledger_v1[0].key_facts
+    lesson_versions = [
+        item for item in facts.list_artifacts(created.id) if item.kind == "lesson"
+    ]
+    assert len(lesson_versions) == 2
+    assert "变量保存一个值" in facts.get_artifact(
+        lesson_versions[0].artifact_id, lesson_versions[0].version,
+    ).content["markdown"]
+    writer = next(item for item in provider.requests if item.role == "writer")
+    repair = next(item for item in provider.requests if item.role == "repair")
+    assert writer.context_contract_version == 1
+    assert "45/50" not in writer.model_dump_json()
+    assert [item.kind for item in repair.inputs] == ["lesson", "quality"]
+    assert "humanizer.language.filler" in repair.model_dump_json()
+    assert "humanizer.language.promotion" not in repair.model_dump_json()
+
+
+def test_new_run_unknown_language_rule_waits_instead_of_guessing_repair(tmp_path):
+    class UnknownRuleProvider(FakeProvider):
+        repair_calls = 0
+
+        def invoke(self, request):
+            if request.role == "repair":
+                self.repair_calls += 1
+            if request.role == "reviewer" and request.goal.startswith("humanizer"):
+                return AgentResponse(role="reviewer", payload={
+                    "status": "manual_review", "checks": ["表达问题"],
+                    "findings": [{
+                        "code": "language.unmapped", "category": "language",
+                        "severity": "minor", "evidence": "变量保存一个值",
+                        "recommendation": "请人工判断",
+                    }],
+                    "language_risk": "规则未登记", "limitations": ["待人工"],
+                })
+            return super().invoke(request)
+
+    provider = UnknownRuleProvider()
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    runner = V0Runner(provider, store=facts)
+    created = runner.create(CourseInput(
+        topic="Python 变量", audience="初学者", goal="解释变量", language="zh",
+        expected_chapters=1, min_effective_chars=1,
+    ), request_key="unknown-language-rule")
+    with facts.connect() as connection:
+        connection.execute(
+            "UPDATE runs SET mission_review_required=0, source_evidence_version=0 "
+            "WHERE id=?", (created.id,),
+        )
+        connection.execute("DELETE FROM snapshots WHERE run_id=?", (created.id,))
+
+    runner.execute(created.id)
+    result = runner.get(created.id)
+    assert result.stages[5].status == "waiting_for_human"
+    assert result.stages[5].failure_reason == "quality_rule_requires_human"
+    assert provider.repair_calls == 0
 
 
 def test_failed_first_batch_never_schedules_second_batch(tmp_path):

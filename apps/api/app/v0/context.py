@@ -5,8 +5,11 @@ from typing import Callable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.v0.context_contracts import ReviewerPackV1, WriterPackV1
 from app.v0.provider import AgentInput
 from app.v0.schemas import AgentRole, ArtifactRecord, ArtifactRef, CourseInput
+from app.v0.skill_rules import rule_ids_for
+from app.v0.token_preflight import TOKEN_BUDGETS
 
 
 CONTEXT_BUDGETS: dict[AgentRole, int] = {
@@ -248,6 +251,128 @@ class ContextPackBuilder:
             ],
         )
 
+    def for_writer_v1(
+        self,
+        run_id: str,
+        mission_ref: ArtifactRef,
+        blueprint_ref: ArtifactRef,
+        batch_plan_ref: ArtifactRef,
+        *,
+        lesson_index: int,
+        previous_lesson_ref: ArtifactRef | None = None,
+        source_policy: str,
+        source_summaries: list[dict],
+        min_effective_chars: int,
+    ) -> ContextPack:
+        self._load(run_id, mission_ref)
+        blueprint = self._load(run_id, blueprint_ref)
+        plan = self._load(run_id, batch_plan_ref)
+        try:
+            brief = blueprint.content["lessons"][lesson_index]
+        except (IndexError, KeyError, TypeError) as error:
+            raise ValueError("Writer 章节索引不在 Blueprint 中") from error
+        previous_summary = None
+        if previous_lesson_ref is not None:
+            previous = self._load(run_id, previous_lesson_ref)
+            previous_summary = "；".join(previous.content.get("key_facts", [])) or None
+        original_ledger = plan.content.get("continuity_ledger_v1", [])
+        ledger = original_ledger[-20:]
+        truncated = len(ledger) != len(original_ledger)
+        if previous_summary is not None and len(previous_summary) > 800:
+            previous_summary = previous_summary[:800]
+            truncated = True
+        contract = WriterPackV1.model_validate({
+            "chapter_number": lesson_index + 1,
+            "min_effective_chars": min_effective_chars,
+            "brief": brief,
+            "mission_ref": mission_ref,
+            "blueprint_ref": blueprint_ref,
+            "batch_plan_ref": batch_plan_ref,
+            "source_policy": source_policy,
+            "source_summaries": source_summaries,
+            "source_evidence_status": (
+                "eligible_documents" if source_summaries else "missing"
+            ),
+            "rule_ids": rule_ids_for("writer"),
+            "previous_summary": previous_summary,
+            "continuity_ledger": ledger,
+        })
+        return self._pack("writer", [
+            AgentInput(
+                kind="mission", reference=mission_ref,
+                content={
+                    "source_policy": contract.source_policy,
+                    "generation_constraints": {
+                        "min_effective_chars": contract.min_effective_chars,
+                    },
+                },
+            ),
+            AgentInput(
+                kind="blueprint", reference=blueprint_ref,
+                content={
+                    "current_lesson_brief": contract.brief.model_dump(exclude_none=True),
+                    "source_evidence_status": contract.source_evidence_status,
+                    "source_summaries": [
+                        item.model_dump() for item in contract.source_summaries
+                    ],
+                },
+            ),
+            AgentInput(
+                kind="batch_plan", reference=batch_plan_ref,
+                content={
+                    "chapter_number": contract.chapter_number,
+                    "previous_summary": contract.previous_summary,
+                    "continuity_truncated": truncated,
+                    "continuity_ledger": [
+                        item.model_dump() for item in contract.continuity_ledger
+                    ],
+                },
+            ),
+        ], truncated=truncated, enforce_char_budget=False)
+
+    def for_reviewer_v1(
+        self,
+        run_id: str,
+        blueprint_ref: ArtifactRef,
+        lesson_ref: ArtifactRef,
+        *,
+        lesson_index: int,
+        gate: str,
+    ) -> ContextPack:
+        blueprint = self._load(run_id, blueprint_ref)
+        lesson = self._load(run_id, lesson_ref)
+        try:
+            brief = blueprint.content["lessons"][lesson_index]
+        except (IndexError, KeyError, TypeError) as error:
+            raise ValueError("Reviewer 章节索引不在 Blueprint 中") from error
+        rule_ids = (
+            ("teach.review", "teach.sources", "teaching.practice")
+            if gate == "rubric" else tuple(
+                rule_id for rule_id in rule_ids_for("reviewer")
+                if rule_id.startswith("humanizer.")
+            )
+        )
+        contract = ReviewerPackV1.model_validate({
+            "chapter_number": lesson_index + 1,
+            "brief": brief,
+            "lesson_ref": lesson_ref,
+            "candidate_markdown": lesson.content["markdown"],
+            "gate": gate,
+            "rule_ids": rule_ids,
+        })
+        return self._pack("reviewer", [
+            AgentInput(
+                kind="blueprint", reference=blueprint_ref,
+                content={"current_lesson_brief": contract.brief.model_dump(
+                    exclude_none=True,
+                )},
+            ),
+            AgentInput(
+                kind="lesson", reference=lesson_ref,
+                content={"candidate_markdown": contract.candidate_markdown},
+            ),
+        ], enforce_char_budget=False)
+
     def _load(self, run_id: str, reference: ArtifactRef) -> ArtifactRecord:
         record = self.loader(reference.artifact_id, reference.version)
         if record.run_id != run_id or reference.run_id != run_id:
@@ -306,10 +431,11 @@ class ContextPackBuilder:
         inputs: list[AgentInput],
         *,
         truncated: bool = False,
+        enforce_char_budget: bool = True,
     ) -> ContextPack:
         total = self._length(inputs)
-        budget = CONTEXT_BUDGETS[role]
-        if total > budget:
+        budget = CONTEXT_BUDGETS[role] if enforce_char_budget else TOKEN_BUDGETS[role]
+        if enforce_char_budget and total > budget:
             raise ContextBudgetError(f"{role} Context Pack 超过 {budget} 字符预算")
         return ContextPack(
             role=role,

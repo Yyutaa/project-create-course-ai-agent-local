@@ -5,13 +5,14 @@ import os
 from typing import Literal, Protocol
 
 from langchain_core.exceptions import OutputParserException
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_deepseek import ChatDeepSeek
 from langsmith import tracing_context
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.v0.local_config import ConfigError, LocalConfigStore
+from app.v0.prompt_render import render_agent_messages
+from app.v0.token_preflight import preflight_request
 from app.v0.schemas import AgentRole, ArtifactRef
 from app.v0.source_tools import FetchInput, SearchInput
 
@@ -60,6 +61,7 @@ class AgentRequest(BaseModel):
     instructions: list[str] = Field(min_length=1)
     inputs: list[AgentInput] = Field(min_length=1)
     output_schema: dict
+    context_contract_version: int = Field(default=0, ge=0, le=1)
 
 
 class AgentResponse(BaseModel):
@@ -124,27 +126,21 @@ class RealProvider:
             os.getenv("COURSE_LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY", ""),
         )
 
+    def preflight(
+        self, request: AgentRequest, messages: list[dict] | None = None,
+    ) -> None:
+        preflight_request(
+            request, self.model, messages=messages,
+            tools=SOURCE_FUNCTIONS if messages is not None else None,
+        )
+
     def invoke(self, request: AgentRequest) -> AgentResponse:
         if not all((self.base_url, self.model, self.api_key)):
             raise ProviderError("LLM 配置不完整：请设置 base_url、model 和 api_key")
 
-        system = {
-            "role": request.role,
-            "goal": request.goal,
-            "instructions": request.instructions,
-            "output_schema": request.output_schema,
-            "rules": [
-                "只返回一个符合 output_schema 的 JSON 对象",
-                "不得修改 Run 状态或决定 release",
-            ],
-        }
-        inputs = [item.model_dump(mode="json") for item in request.inputs]
-        messages = ChatPromptTemplate.from_messages(
-            [("system", "{system}"), ("human", "{inputs}")]
-        ).format_messages(
-            system=json.dumps(system, ensure_ascii=False),
-            inputs=json.dumps({"inputs": inputs}, ensure_ascii=False),
-        )
+        messages = render_agent_messages(request)
+        if request.context_contract_version == 1:
+            self.preflight(request)
 
         try:
             model = ChatDeepSeek(
@@ -192,6 +188,8 @@ class RealProvider:
     ) -> ToolTurn:
         if not all((self.base_url, self.model, self.api_key)):
             raise ProviderError("LLM 配置不完整：请设置 base_url、model 和 api_key")
+        if request.context_contract_version == 1:
+            self.preflight(request, messages)
         try:
             client = OpenAI(
                 base_url=self.base_url, api_key=self.api_key,
@@ -246,6 +244,17 @@ class LocalConfiguredProvider:
     def __init__(self, config: LocalConfigStore):
         self.config = config
 
+    def preflight(
+        self, request: AgentRequest, messages: list[dict] | None = None,
+    ) -> None:
+        try:
+            model, _ = self.config.require_credentials()
+        except ConfigError:
+            raise ProviderError("请配置 DeepSeek 后再运行") from None
+        RealProvider("https://api.deepseek.com", model, "preflight-only").preflight(
+            request, messages,
+        )
+
     def invoke(self, request: AgentRequest) -> AgentResponse:
         try:
             model, key = self.config.require_credentials()
@@ -296,6 +305,8 @@ class FakeProvider:
                     "例如，`name = '小林'` 后打印 `name` 会看到「小林」。"
                     "练习：把名字改成自己的名字，观察输出。"
                 ),
+                "key_facts": ["变量保存可更新的值"],
+                "next_goals": ["继续学习条件分支"],
             },
             "reviewer": {
                 "status": "ready",

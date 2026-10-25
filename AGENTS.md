@@ -104,8 +104,9 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 - 每个 Agent Definition 必须声明目标、输入 Artifact kind、输出 Artifact kind、输出
   Pydantic Schema、Skill 切片和 Tool 白名单。只加载当前角色需要的 Skill 规则摘要及
   来源章节，不复制完整 Skill。
-- Humanizer 规则只允许进入 Reviewer 和 Repair 的 quality 语境。它只判断或修订中文
-  表达，不能核验事实、改变任务范围、更新 Run 状态或决定 release。
+- Humanizer 写作指导投影可进入新版 Writer；评分门槛和语言 Gate 仅由 Reviewer
+  使用，Repair 只接收当前 Finding 对应规则。它不能核验事实、改变任务范围、
+  更新 Run 状态或决定 release。旧 Run 维持原角色切片。
 - Provider 统一使用结构化 `AgentRequest → AgentResponse`：请求携带角色、目标、短规则、
   精确输入 Artifact 与目标 JSON Schema；响应只携带角色和 JSON 对象。真实 Provider 与
   Fake Provider 使用同一接口，Fake 仍只用于测试。
@@ -286,7 +287,7 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 
 ## 课程生成约束
 
-- 现行 SQLite schema 版本为 13，可从 v7 起重复迁移。`intakes` 持久保存
+- 现行 SQLite schema 版本为 14，可从 v7 起重复迁移。`intakes` 持久保存
   `source_policy`、`expected_chapters`、`min_effective_chars`、`token_limit`，`runs` 保存
   `constraints_version`，`publications` 保存已发布课程。迁移前 Run 固定为版本 0，不追溯
   执行新约束；新 Run 固定为版本 1。
@@ -324,6 +325,23 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 - Token 阈值不改变既有 48/60 次 Provider 调用预算、质量返工预算、七步顺序或人工
   release 权限。约束状态进入安全读取模型和证据索引，但不得复制 Intake、正文、Prompt、
   模型原始响应或密钥。
+
+## 角色上下文契约 v14
+
+- SQLite v14 给既有 Run 的 `context_contract_version` 默认 0，不追溯改写产物；
+  新 Run 固定为 1。旧 Run 保留原 Context Pack 和字符预算。
+- 新 Run 的 Writer、Reviewer、Repair 先以 Pydantic 校验本轮 Pack，拒绝空必需字段、
+  越界章号、过量来源摘要和额外字段。角色规则从版本化 `SKILL_RULE_SETS` 投影，
+  不在运行时解析完整 Skill 文档；Writer 不接收评分门槛，Reviewer 不写正文，
+  Repair 只见当前 Finding 的规则与单行摘录。未知规则转人工，不推断修复方式。
+- 新 Run 的 Writer 输出 `key_facts/next_goals`；完整批次结束后追加仅含这两类
+  要点及 `lesson_id` 的 `continuity_ledger_v1`，不把全文放进台账。旧
+  `continuity_ledger` 保持可读；Lesson 和 Quality 版本仍以 Artifact/Event 为事实。
+- 新 Run 的真实 DeepSeek Provider 对最终发送消息和每轮来源工具消息使用固定 V4
+  tokenizer 离线预估，含规则、JSON Schema、工具声明与结果，预留 20% 加 128 Token。
+  不支持的模型、tokenizer 缺失或超预算时不发送，也不占用 Provider 调用次数；
+  离线数字仅为 `preflight_estimate`，实际用量仍只取 API `usage`。旧 Run 不启用此
+  Token 预检。Prompt、完整 Skill 和人工反馈原文不得进入 Graph State 或普通日志。
 
 ## 官方来源核验与受控 ToolRuntime
 

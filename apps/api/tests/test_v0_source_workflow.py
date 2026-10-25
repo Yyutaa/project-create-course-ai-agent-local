@@ -35,6 +35,8 @@ class SourceCourseProvider(FakeProvider):
             return ToolTurn(content=json.dumps({
                 "title": "Vue state",
                 "markdown": "# Vue state\n\nstate changes update views",
+                "key_facts": ["state changes update views"],
+                "next_goals": [],
             }))
         raise AssertionError(f"Unexpected tool role {request.role}")
 

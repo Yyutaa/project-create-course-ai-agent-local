@@ -39,10 +39,11 @@ def start(client, key="start-1", course=None, *, process=True, legacy=True):
         run = runner.get(response.json()["id"])
         run.constraints_version = 0
         run.source_evidence_version = 0
+        run.context_contract_version = 0
         with runner.store.connect() as connection:
             connection.execute(
                 "UPDATE runs SET mission_review_required=0, constraints_version=0, "
-                "source_evidence_version=0 "
+                "source_evidence_version=0, context_contract_version=0 "
                 "WHERE id=?",
                 (response.json()["id"],),
             )
@@ -84,6 +85,9 @@ def test_api_starts_and_reads_run_without_auto_release(client):
 
 def test_mission_review_api_only_accepts_command_and_reads_pending_version(client):
     run_id = start(client, legacy=False).json()["id"]
+    assert client.get(f"/api/v0/runs/{run_id}").json()[
+        "context_contract_version"
+    ] == 1
     execution = client.get(f"/api/v0/runs/{run_id}/execution").json()
     pending = execution["mission_review"]
     assert pending["status"] == "pending"

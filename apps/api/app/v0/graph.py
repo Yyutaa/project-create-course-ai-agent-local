@@ -6,6 +6,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.v0.batching import assign_blueprint_ids, build_batch_plan, complete_batch
 from app.v0.context import ContextBudgetError, ContextPackBuilder
+from app.v0.context_contracts import RepairPackV1
 from app.v0.budget import BudgetExceeded, RetryStopped
 from app.v0.sensitive import safe_error
 from app.v0.provider import AgentInput, ProviderError, TransientProviderError
@@ -18,6 +19,8 @@ from app.v0.quality_loop import (
 )
 from app.v0.runner import V0_QUALITY_LIMITATIONS
 from app.v0.source_audit import source_gate
+from app.v0.skill_rules import repair_rules_for
+from app.v0.token_preflight import TokenPreflightError
 from app.v0.schemas import (
     BLUEPRINT_CHAPTER_DEVIATION_REASON,
     GraphState,
@@ -233,6 +236,13 @@ class WorkflowNodes:
                 "last_outcome": "waiting_for_human",
                 "exit_reason": error.code,
             }
+        except TokenPreflightError as error:
+            self.runner._mark_waiting(state.run_id, index, error.code)
+            return {
+                "current_node": stage,
+                "last_outcome": "waiting_for_human",
+                "exit_reason": error.code,
+            }
         except RetryStopped as error:
             self.runner._mark_waiting(state.run_id, index, error.code)
             return {
@@ -312,7 +322,10 @@ class WorkflowNodes:
                 include_generation_constraints=run.constraints_version == 1,
             )
             sources = []
-        result = self.runner.executor.invoke("mission", state.run_id, inputs=pack.inputs)
+        result = self.runner.executor.invoke(
+            "mission", state.run_id, inputs=pack.inputs,
+            context_contract_version=run.context_contract_version,
+        )
         self.runner._write_role_success(
             "mission",
             state.run_id,
@@ -395,6 +408,7 @@ class WorkflowNodes:
                 "与来源边界，不得为凑章伪造内容或来源证据。"
                 if run.planning_loop_version == 1 else None
             ),
+            context_contract_version=run.context_contract_version,
         )
         if source_runtime is not None and not source_runtime.facts.summary_pack(
             state.run_id
@@ -609,7 +623,20 @@ class WorkflowNodes:
             if lesson_index > 0:
                 previous_id = run.blueprint.lessons[lesson_index - 1].lesson_id
                 previous_ref = artifact_refs.get(f"lesson:{previous_id}")
-            pack = self.context.for_writer(
+            writer_args = dict(
+                lesson_index=lesson_index,
+                previous_lesson_ref=previous_ref,
+                source_policy=run.course_input.source_policy,
+                min_effective_chars=run.course_input.min_effective_chars,
+                source_summaries=(
+                    source_runtime.facts.summary_pack(state.run_id)
+                    if source_runtime is not None else []
+                ),
+            )
+            pack = self.context.for_writer_v1(
+                state.run_id, mission_ref, blueprint_ref, batch_plan_ref,
+                **writer_args,
+            ) if run.context_contract_version == 1 else self.context.for_writer(
                 state.run_id,
                 mission_ref,
                 blueprint_ref,
@@ -634,6 +661,7 @@ class WorkflowNodes:
             candidate = self.runner.executor.invoke(
                 "writer", state.run_id, inputs=pack.inputs,
                 source_runtime=source_runtime, topic=run.course_input.topic,
+                context_contract_version=run.context_contract_version,
             )
             result = candidate.model_copy(
                 update={
@@ -657,7 +685,10 @@ class WorkflowNodes:
             artifact_refs[f"lesson:{brief.lesson_id}"] = lesson_ref
             completed.append((result, lesson_ref))
 
-        updated_plan = complete_batch(run.batch_plan, batch_id, completed)
+        updated_plan = complete_batch(
+            run.batch_plan, batch_id, completed,
+            context_contract_version=run.context_contract_version,
+        )
         self.runner._persist_system_artifact(
             state.run_id,
             "batch_plan",
@@ -769,6 +800,16 @@ class WorkflowNodes:
                     quality_sources,
                 )
                 return {"current_node": "quality", "last_outcome": "waiting_for_human"}
+            if not self._auto_repairable(run, finding):
+                self.runner._mark_waiting(
+                    state.run_id, index, "quality_rule_requires_human",
+                    summary, "system", quality_sources,
+                )
+                return {
+                    "current_node": "quality",
+                    "last_outcome": "waiting_for_human",
+                    "exit_reason": "quality_rule_requires_human",
+                }
             if not self._has_repair_budget(state, finding.finding_id):
                 self.runner._mark_waiting(
                     state.run_id,
@@ -846,6 +887,15 @@ class WorkflowNodes:
             )
             return {"current_node": "quality", "last_outcome": "waiting_for_human"}
         finding = run.quality.evidence_findings[-1] if run.quality.evidence_findings else None
+        if finding is not None and not self._auto_repairable(run, finding):
+            self.runner._mark_waiting(
+                state.run_id, 5, "quality_rule_requires_human",
+            )
+            return {
+                "current_node": "quality",
+                "last_outcome": "waiting_for_human",
+                "exit_reason": "quality_rule_requires_human",
+            }
         if finding is None or not self._has_repair_budget(state, finding.finding_id):
             raise GraphRouteError("Quality checkpoint 缺少可恢复 Finding")
         return {
@@ -894,13 +944,20 @@ class WorkflowNodes:
                 self.runner.provider, runtime.facts, lesson_ref,
                 brief.lesson_id, markdown,
                 self.runner._execution_owner, self.runner._execution_epoch,
+                context_contract_version=run.context_contract_version,
             ))
             if reports[-1].results[0].status != "pass":
                 return GateReport(
                     [result for report in reports for result in report.results],
                     [finding for report in reports for finding in report.findings],
                 )
-        pack = self.context.for_reviewer(
+        pack = self.context.for_reviewer_v1(
+            state.run_id,
+            self._ref(state, "blueprint"),
+            lesson_ref,
+            lesson_index=state.quality_cursor,
+            gate="rubric",
+        ) if run.context_contract_version == 1 else self.context.for_reviewer(
             state.run_id,
             self._ref(state, "mission"),
             self._ref(state, "blueprint"),
@@ -915,6 +972,7 @@ class WorkflowNodes:
                 brief.lesson_id,
                 markdown,
                 pack.inputs,
+                context_contract_version=run.context_contract_version,
             )
         )
         if reports[-1].results[0].status != "pass":
@@ -922,6 +980,13 @@ class WorkflowNodes:
                 [result for report in reports for result in report.results],
                 [finding for report in reports for finding in report.findings],
             )
+        humanizer_inputs = (
+            self.context.for_reviewer_v1(
+                state.run_id, self._ref(state, "blueprint"), lesson_ref,
+                lesson_index=state.quality_cursor, gate="humanizer",
+            ).inputs
+            if run.context_contract_version == 1 else []
+        )
         reports.append(
             review_gate(
                 self.runner,
@@ -929,7 +994,8 @@ class WorkflowNodes:
                 lesson_ref,
                 brief.lesson_id,
                 markdown,
-                [],
+                humanizer_inputs,
+                context_contract_version=run.context_contract_version,
             )
         )
         return GateReport(
@@ -985,6 +1051,16 @@ class WorkflowNodes:
             state.loop_counts.repair_attempts < 3
             and state.loop_counts.finding_attempts.get(finding_id, 0) < 2
         )
+
+    @staticmethod
+    def _auto_repairable(run, finding) -> bool:
+        if run.context_contract_version == 0:
+            return True
+        try:
+            repair_rules_for(finding.rule_id)
+        except ValueError:
+            return False
+        return True
 
     @staticmethod
     def _advance_finding_counts(state: GraphState, findings, next_finding) -> LoopCounts:
@@ -1066,7 +1142,29 @@ class WorkflowNodes:
             )
             quality_ref = self.runner._source_refs(state.run_id, ("quality",))[0]
         blueprint_ref = self._ref(state, "blueprint")
-        inputs = [
+        if run.context_contract_version == 1:
+            contract = RepairPackV1.model_validate({
+                "finding_id": task.finding_id,
+                "lesson_ref": source_ref,
+                "quality_ref": quality_ref,
+                "line_number": task.line_start,
+                "excerpt": task.excerpt,
+                "excerpt_hash": task.excerpt_hash,
+                "rule_id": task.rule_id,
+                "target": task.objective,
+            })
+            inputs = [
+                AgentInput(
+                    kind="lesson", reference=source_ref,
+                    content={"excerpt": contract.excerpt},
+                ),
+                AgentInput(
+                    kind="quality", reference=quality_ref,
+                    content={"repair_task": contract.model_dump(mode="json")},
+                ),
+            ]
+        else:
+            inputs = [
             AgentInput(kind="blueprint", reference=blueprint_ref, content={}),
             AgentInput(
                 kind="lesson", reference=source_ref, content={"excerpt": task.excerpt}
@@ -1076,9 +1174,16 @@ class WorkflowNodes:
                 reference=quality_ref,
                 content={"repair_task": task.model_dump(mode="json")},
             ),
-        ]
-        self.context._pack("repair", inputs)
-        patch = self.runner.executor.invoke("repair", state.run_id, inputs=inputs)
+            ]
+        self.context._pack(
+            "repair", inputs,
+            enforce_char_budget=run.context_contract_version == 0,
+        )
+        patch = self.runner.executor.invoke(
+            "repair", state.run_id, inputs=inputs,
+            context_contract_version=run.context_contract_version,
+            repair_rule_id=task.rule_id if run.context_contract_version == 1 else None,
+        )
         from app.v0.schemas import LessonDraft
 
         original = LessonDraft.model_validate(source.content)
@@ -1223,6 +1328,16 @@ class WorkflowNodes:
             )
             return {"current_node": "verification", "last_outcome": "waiting_for_human"}
         finding = report.findings[0] if report.findings else None
+        if finding is not None and not self._auto_repairable(run, finding):
+            self.runner._mark_waiting(
+                state.run_id, index, "quality_rule_requires_human",
+                summary, "system", verification_sources,
+            )
+            return {
+                "current_node": "verification",
+                "last_outcome": "waiting_for_human",
+                "exit_reason": "quality_rule_requires_human",
+            }
         next_counts = (
             self._advance_finding_counts(state, summary.evidence_findings, finding)
             if finding is not None
@@ -1304,6 +1419,15 @@ class WorkflowNodes:
             ),
             None,
         )
+        if finding is not None and not self._auto_repairable(run, finding):
+            self.runner._mark_waiting(
+                state.run_id, 5, "quality_rule_requires_human",
+            )
+            return {
+                "current_node": "verification",
+                "last_outcome": "waiting_for_human",
+                "exit_reason": "quality_rule_requires_human",
+            }
         next_counts = (
             self._advance_finding_counts(state, run.quality.evidence_findings, finding)
             if finding is not None

@@ -223,6 +223,71 @@ def test_writer_pack_uses_current_brief_and_previous_summary_not_full_context():
     assert pack.total_chars <= 12_000
 
 
+def test_new_writer_pack_projects_only_fact_ledger_and_explicit_source_state():
+    builder, records = fixture_builder()
+    records["batch_plan"].content["continuity_ledger_v1"] = [{
+        "lesson_id": "lesson-a", "key_facts": ["变量可以更新"],
+        "next_goals": ["解释条件分支"],
+    }]
+    records["lesson"].content["key_facts"] = ["变量可以更新"]
+    pack = builder.for_writer_v1(
+        "run-1", reference(records["mission"]),
+        reference(records["blueprint"]), reference(records["batch_plan"]),
+        lesson_index=1, previous_lesson_ref=reference(records["lesson"]),
+        source_policy="仅允许使用公开官方资料", source_summaries=[],
+        min_effective_chars=12_000,
+    )
+
+    payload = pack.model_dump_json()
+    assert "变量可以更新" in payload
+    assert "解释条件分支" in payload
+    assert "这是一段候选正文" not in payload
+    assert "next_promises" not in payload
+    assert "评分" not in payload
+    assert pack.inputs[0].content["generation_constraints"] == {
+        "min_effective_chars": 12_000
+    }
+    assert all(item.content for item in pack.inputs)
+
+
+def test_new_writer_pack_bounds_old_ledger_but_keeps_latest_fact_and_ref():
+    builder, records = fixture_builder()
+    records["batch_plan"].content["continuity_ledger_v1"] = [
+        {
+            "lesson_id": f"lesson-{index}",
+            "key_facts": [f"事实 {index}"],
+            "next_goals": [f"目标 {index}"],
+        }
+        for index in range(22)
+    ]
+    records["lesson"].content["key_facts"] = ["核心事实" * 200]
+    pack = builder.for_writer_v1(
+        "run-1", reference(records["mission"]),
+        reference(records["blueprint"]), reference(records["batch_plan"]),
+        lesson_index=1, previous_lesson_ref=reference(records["lesson"]),
+        source_policy="仅允许使用公开官方资料", source_summaries=[],
+        min_effective_chars=12_000,
+    )
+    content = pack.inputs[2].content
+    assert len(content["continuity_ledger"]) == 20
+    assert content["continuity_ledger"][0]["lesson_id"] == "lesson-2"
+    assert content["continuity_ledger"][-1]["lesson_id"] == "lesson-21"
+    assert len(content["previous_summary"]) <= 800
+    assert content["continuity_truncated"] is True
+    assert pack.inputs[2].reference == reference(records["batch_plan"])
+
+
+def test_new_reviewer_pack_does_not_include_writer_instructions_or_empty_mission():
+    builder, records = fixture_builder()
+    pack = builder.for_reviewer_v1(
+        "run-1", reference(records["blueprint"]),
+        reference(records["lesson"]), lesson_index=0, gate="rubric",
+    )
+    assert [item.kind for item in pack.inputs] == ["blueprint", "lesson"]
+    assert "这是一段候选正文" in pack.model_dump_json()
+    assert "逐章生成" not in pack.model_dump_json()
+
+
 def test_reviewer_pack_contains_candidate_and_minimum_rubric():
     builder, records = fixture_builder()
 

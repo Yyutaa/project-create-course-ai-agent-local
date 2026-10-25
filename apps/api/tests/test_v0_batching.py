@@ -122,6 +122,32 @@ def test_continuity_summary_is_bounded():
         )
 
 
+def test_new_batch_ledger_uses_facts_and_goals_without_full_prose():
+    blueprint = assign_blueprint_ids(BlueprintDraft.model_validate(RAW_BLUEPRINT))
+    plan = build_batch_plan(blueprint)
+    completed = []
+    for index in plan.batches[0]:
+        lesson = blueprint.lessons[index]
+        completed.append((LessonDraft(
+            title=lesson.title, markdown="# 不能进入台账的全文",
+            lesson_id=lesson.lesson_id, batch_id=lesson.batch_id,
+            key_facts=[f"事实 {index}"], next_goals=[f"目标 {index}"],
+        ), ArtifactRef(
+            run_id="run-1", artifact_id=f"artifact-{index}", version=1,
+            kind="lesson", content_hash=f"hash-{index}",
+        )))
+
+    updated = complete_batch(
+        plan, plan.batch_ids[0], completed, context_contract_version=1,
+    )
+
+    assert plan.continuity_ledger_v1 == []
+    assert [note.key_facts for note in updated.continuity_ledger_v1] == [
+        ["事实 0"], ["事实 1"], ["事实 2"],
+    ]
+    assert "不能进入台账的全文" not in updated.model_dump_json()
+
+
 def test_identical_lessons_are_rejected_instead_of_sharing_identity():
     duplicate = BlueprintDraft(
         lessons=[

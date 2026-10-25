@@ -8,6 +8,7 @@ from app.v0.schemas import (
     BatchPlanDraft,
     BlueprintDraft,
     ContinuityEntry,
+    ContinuityNoteV1,
     LessonDraft,
 )
 
@@ -77,6 +78,8 @@ def complete_batch(
     plan: BatchPlanDraft,
     batch_id: str,
     completed: list[tuple[LessonDraft, ArtifactRef]],
+    *,
+    context_contract_version: int = 0,
 ) -> BatchPlanDraft:
     try:
         batch_index = plan.batch_ids.index(batch_id)
@@ -91,6 +94,22 @@ def complete_batch(
         raise ValueError("批次必须完整并按计划顺序完成")
     if any(entry.batch_id == batch_id for entry in plan.continuity_ledger):
         raise ValueError("批次已经写入 continuity ledger")
+
+    if context_contract_version == 1:
+        if any(note.lesson_id in expected for note in plan.continuity_ledger_v1):
+            raise ValueError("批次已经写入 continuity ledger")
+        notes = [
+            ContinuityNoteV1(
+                lesson_id=lesson.lesson_id,
+                key_facts=lesson.key_facts,
+                next_goals=lesson.next_goals,
+            )
+            for lesson, _ in completed
+        ]
+        return plan.model_copy(
+            update={"continuity_ledger_v1": [*plan.continuity_ledger_v1, *notes]},
+            deep=True,
+        )
 
     entries = [
         ContinuityEntry(

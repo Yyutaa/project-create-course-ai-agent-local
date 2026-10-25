@@ -136,6 +136,14 @@ class ContinuityEntry(BaseModel):
     next_promises: list[ContextPromise] = Field(default_factory=list, max_length=10)
 
 
+class ContinuityNoteV1(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lesson_id: NonEmptyText
+    key_facts: list[ContextPromise] = Field(min_length=1, max_length=10)
+    next_goals: list[ContextPromise] = Field(default_factory=list, max_length=10)
+
+
 class BatchPlanDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -143,6 +151,7 @@ class BatchPlanDraft(BaseModel):
     batch_ids: list[NonEmptyText] = Field(default_factory=list)
     lesson_ids: list[list[NonEmptyText]] = Field(default_factory=list)
     continuity_ledger: list[ContinuityEntry] = Field(default_factory=list)
+    continuity_ledger_v1: list[ContinuityNoteV1] = Field(default_factory=list)
 
 
 class LessonDraft(BaseModel):
@@ -155,6 +164,12 @@ class LessonDraft(BaseModel):
     continuity_summary: str = Field(default="", max_length=800)
     terminology: list[ContextTerm] = Field(default_factory=list, max_length=20)
     next_promises: list[ContextPromise] = Field(default_factory=list, max_length=10)
+    key_facts: list[ContextPromise] = Field(default_factory=list, max_length=10)
+    next_goals: list[ContextPromise] = Field(default_factory=list, max_length=10)
+
+
+class WriterLessonDraftV1(LessonDraft):
+    key_facts: list[ContextPromise] = Field(min_length=1, max_length=10)
 
 
 class ReviewFinding(BaseModel):
@@ -349,6 +364,7 @@ class V0Run(BaseModel):
     constraints_version: int = Field(default=0, ge=0, le=1)
     source_evidence_version: int = Field(default=0, ge=0, le=1)
     planning_loop_version: int = Field(default=0, ge=0, le=1)
+    context_contract_version: int = Field(default=0, ge=0, le=1)
     revision: int = 0
     artifacts: list[ArtifactSummary] = Field(default_factory=list)
     status: RunStatus = "running"
