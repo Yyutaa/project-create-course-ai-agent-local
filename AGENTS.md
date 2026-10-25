@@ -268,8 +268,9 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
   Artifact，不新增版本。
 - `after_artifact` 崩溃恢复优先从 `node_effects` 读取 recovery effect，
   不再只依赖自定义 checkpoint 的 event id。
-- 自定义 `checkpoints` 仍保存节点状态/位置；`node_effects` 负责副作用身份，
-  两者在退场过渡期并存。
+- 新 Run 已停止写入自定义 `checkpoints`；`node_effects` 负责副作用身份，
+  NodeExecution `after_state_json` 负责节点结果状态。旧 Run 在退场期继续使用
+  自定义表，存量排空后再删除。
 
 ### gate 等待状态解耦
 
@@ -278,10 +279,11 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 - 新 Run 的 Mission/Quality/Source gate 审批改读 NodeExecution 的 waiting state，
   `checkpoint_id` 使用 NodeExecution ID，不再依赖 `last_checkpoint()`。
 - 旧 Run 仍回退到自定义 checkpoints。
-- Worker 对节点内崩溃的恢复仍使用自定义 checkpoint：LangGraph 的节点边界 checkpoint
-  不包含节点内部已提交 Artifact 进度，effect 账本本身不足以重建节点内循环状态。
-  下一步需要让 Generation/Blueprint 等节点从 `node_effects` 重建已完成子项，才能切换
-  Worker 到 LangGraph `invoke(None)` 并停止写自定义 checkpoints。
+- Worker 对新 Run 已切换到 LangGraph 恢复：存在待执行节点时 `invoke(None)` 续跑，
+  否则从 START 冷重放。Mission/Blueprint/Generation 会从 `node_effects` 重建已提交
+  Artifact，Generation 还会复用已提交 Lesson，避免重复 Provider 调用。
+- 当前是节点级恢复：节点内部按行/段/Token 续跑仍不支持；崩溃后会重跑当前节点，
+  已提交事实由 effect 账本与幂等事件保证不重复。
 
 ### 执行协议检查项与待办（2026-10-25）
 
@@ -290,26 +292,30 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 | Command | 部分通过 | 大部分写操作是持久化 Command；release/publish 仍由 API 同步执行 |
 | 输入哈希 | 已实现 | 仅 NodeExecution 级 input_hash + 分类重试，见 `docs/superpowers/specs/2026-10-25-node-execution-input-hash-design.md` |
 | 租约/心跳 | 通过 | 实现完整；心跳续租缺少直接测试 |
-| thread_id | 已实现（双写） | LangGraph SqliteSaver 以 `thread_id=run_id` 记录图状态；自定义 checkpoint 仍是执行权威 |
+| thread_id | 已实现 | LangGraph SqliteSaver 以 `thread_id=run_id` 记录图状态；新 Run 已以 LangGraph 为位置权威 |
 | Mission gate | 试点通过 | 新 Run 使用 `mission_gate` interrupt + `Command(resume)`；旧 Run 保留自定义路径 |
 | Quality/Source/Release gate | 试点通过 | 新 Run 使用 `quality_gate` / `source_gate` / `release_gate` interrupt + resume；旧 Run 保留自定义路径 |
-| 恢复 | 通过 | 从最近 checkpoint 继续，已完成节点不重跑 |
+| 恢复 | 通过 | 新 Run：LangGraph `invoke(None)` 续跑或 START 冷重放，NodeExecution/effect 跳过已提交工作；旧 Run 仍读自定义 checkpoint |
 
 待执行 TODO：
 
 - [x] release / publish 保持同步 API 执行，不命令化（已确认）
 - [ ] 补心跳续租测试：断言 Worker 每 15 秒延长 Run lease 与 Command `claimed_until`
-- [x] thread_id 决策：接入 LangGraph SqliteSaver 双写，`thread_id=run_id`；自定义 checkpoint 保持权威
+- [x] thread_id 决策：接入 LangGraph SqliteSaver，新 Run 以 `thread_id=run_id` 的图状态为位置权威
 - [x] Mission gate 节点级接管试点：新 Run 默认启用，旧 Run 保持自定义路径
 - [x] Quality / Source / Release gate 迁移到 interrupt/resume（技术重试例外）
 - [ ] 补 Graph 层 `TokenPreflightError → waiting_for_human` 的原因码测试
 - [ ] 补 tokenizer 缺失/损坏时 fail-closed 的 Provider 调用计数测试
 - [x] 建立 effect 幂等账本，`after_artifact` 恢复改读 `node_effects`
-- [ ] 让 Generation/Blueprint 等节点从 node_effects 重建节点内进度
-- [ ] 切换 Worker 新 Run 恢复到 LangGraph invoke(None)
-- [ ] 新 Run 停止写自定义 checkpoints，移除 _resume_state 新分支；旧 Run 清零后删表
+- [x] 让 Mission/Blueprint/Generation 从 node_effects 重建节点内已提交进度
+- [x] 切换 Worker 新 Run 恢复到 LangGraph `invoke(None)`，无待执行节点时冷重放
+- [x] 新 Run 停止写自定义 checkpoints，Flow v1 不再使用 `_resume_state`
+- [ ] Quality/Repair/Verification 增加节点内 effect 预检查，恢复时跳过重复 Provider 调用
+      （当前仅保证提交事实幂等；`candidate.accepted/rejected` 已幂等）
+- [ ] 旧 Run 排空后删除自定义 `checkpoints` 表、`last_custom_checkpoint` 与
+      `_resume_state` 旧分支，并移除 `after_checkpoint_id` 兼容读取
 - [ ] 评估 Provider 单次调用结果缓存（input_hash 的更细粒度复用）
-- [ ] 明确不支持 Lesson 行/段/Token 级断点续传，仅支持节点与 Artifact 级恢复
+- [x] 明确不支持 Lesson 行/段/Token 级断点续传，仅支持节点与 Artifact 级恢复
 
 ## 交付证据与风险迁移契约
 
