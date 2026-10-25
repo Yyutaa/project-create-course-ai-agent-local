@@ -1279,3 +1279,210 @@ def test_crash_after_candidate_rejection_does_not_repeat_reject_event(stores):
         ).fetchone()[0]
     assert rejected == 2
     assert facts.get_run(run_id).status == "waiting_for_human"
+
+
+def _claim(
+    commands, run_id, owner, epoch, *, node="mission", hash_="h1",
+    state=None, retry_override=False,
+):
+    return commands.claim_node_execution(
+        run_id, node, state or GraphState(run_id=run_id, current_node=node),
+        owner, epoch, input_hash=hash_, reuse_enabled=True,
+        retry_override=retry_override,
+    )
+
+
+def _finish(
+    commands, run_id, claim, owner, epoch, *, failed=False,
+    failure_class=None, outcome="succeeded",
+):
+    state = GraphState(
+        run_id=run_id, current_node="mission", last_outcome=outcome,
+    )
+    commands.finish_node(
+        claim.execution_id, state, owner, epoch,
+        failed=failed, failure_class=failure_class,
+    )
+
+
+def test_claim_reuses_committed_success_without_new_row(stores):
+    facts, commands, run_id = stores
+    epoch = commands.acquire(run_id, "worker-a")
+    first = _claim(commands, run_id, "worker-a", epoch)
+    assert first.outcome == "claimed"
+    _finish(commands, run_id, first, "worker-a", epoch)
+
+    replay = _claim(commands, run_id, "worker-a", epoch)
+    assert replay.outcome == "reused"
+    assert replay.source_execution_id == first.execution_id
+    assert replay.after_state.last_outcome == "succeeded"
+    with facts.connect() as connection:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM node_executions WHERE run_id=?", (run_id,),
+        ).fetchone()[0]
+        events = connection.execute(
+            "SELECT type FROM events WHERE run_id=? AND type='node.reused'",
+            (run_id,),
+        ).fetchall()
+    assert count == 1
+    assert len(events) == 1
+
+
+def test_claim_does_not_reuse_waiting_outcome(stores):
+    _, commands, run_id = stores
+    epoch = commands.acquire(run_id, "worker-a")
+    first = _claim(commands, run_id, "worker-a", epoch)
+    _finish(
+        commands, run_id, first, "worker-a", epoch,
+        outcome="waiting_for_human",
+    )
+    replay = _claim(commands, run_id, "worker-a", epoch)
+    assert replay.outcome == "claimed"
+    assert replay.execution_id != first.execution_id
+
+
+def test_claim_returns_busy_for_live_same_epoch(stores):
+    _, commands, run_id = stores
+    epoch = commands.acquire(run_id, "worker-a")
+    first = _claim(commands, run_id, "worker-a", epoch)
+    replay = _claim(commands, run_id, "worker-a", epoch)
+    assert replay.outcome == "busy"
+    assert replay.execution_id == first.execution_id
+
+
+def test_claim_takes_over_expired_running(stores):
+    facts, commands, run_id = stores
+    epoch = commands.acquire(run_id, "worker-a", ttl_seconds=1)
+    first = _claim(commands, run_id, "worker-a", epoch)
+    commands.expire_for_test(run_id)
+    epoch_b = commands.acquire(run_id, "worker-b", ttl_seconds=60)
+    replay = _claim(commands, run_id, "worker-b", epoch_b)
+    assert replay.outcome == "claimed"
+    assert replay.execution_id != first.execution_id
+    with facts.connect() as connection:
+        row = connection.execute(
+            "SELECT status, failure_class FROM node_executions WHERE id=?",
+            (first.execution_id,),
+        ).fetchone()
+    assert row["status"] == "FAILED"
+    assert row["failure_class"] == "transient"
+
+
+def test_claim_blocks_deterministic_failure(stores):
+    _, commands, run_id = stores
+    epoch = commands.acquire(run_id, "worker-a")
+    first = _claim(commands, run_id, "worker-a", epoch)
+    _finish(
+        commands, run_id, first, "worker-a", epoch, failed=True,
+        failure_class="deterministic",
+    )
+    replay = _claim(commands, run_id, "worker-a", epoch)
+    assert replay.outcome == "blocked"
+    assert replay.reason == "retry_denied:deterministic"
+
+
+def test_claim_retries_transient_failure_until_three_failures(stores):
+    _, commands, run_id = stores
+    epoch = commands.acquire(run_id, "worker-a", ttl_seconds=60)
+    for _ in range(3):
+        claim = _claim(commands, run_id, "worker-a", epoch)
+        assert claim.outcome == "claimed"
+        _finish(
+            commands, run_id, claim, "worker-a", epoch, failed=True,
+            failure_class="transient",
+        )
+    blocked = _claim(commands, run_id, "worker-a", epoch)
+    assert blocked.outcome == "blocked"
+    assert blocked.reason == "max_attempts_reached"
+
+
+def test_claim_retry_override_bypasses_deterministic_block(stores):
+    _, commands, run_id = stores
+    epoch = commands.acquire(run_id, "worker-a")
+    first = _claim(commands, run_id, "worker-a", epoch)
+    _finish(
+        commands, run_id, first, "worker-a", epoch, failed=True,
+        failure_class="deterministic",
+    )
+    replay = _claim(
+        commands, run_id, "worker-a", epoch, retry_override=True,
+    )
+    assert replay.outcome == "claimed"
+
+
+def test_claim_skips_reuse_for_disabled_runs(stores):
+    _, commands, run_id = stores
+    epoch = commands.acquire(run_id, "worker-a")
+    first = commands.claim_node_execution(
+        run_id, "mission", GraphState(run_id=run_id, current_node="mission"),
+        "worker-a", epoch, input_hash="h1", reuse_enabled=False,
+    )
+    assert first.outcome == "claimed"
+
+
+def test_new_run_reuses_committed_mission_without_provider_call(tmp_path):
+    class CountingProvider(FakeProvider):
+        def __init__(self):
+            super().__init__()
+            self.mission_calls = 0
+
+        def invoke(self, request):
+            if request.role == "mission":
+                self.mission_calls += 1
+            return super().invoke(request)
+
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    provider = CountingProvider()
+    run, _ = facts.create_run(
+        CourseInput(
+            topic="变量", audience="初学者", goal="会解释变量", language="zh",
+            expected_chapters=1, min_effective_chars=1,
+        ),
+        "reuse-mission",
+        enqueue_start=True,
+    )
+    with facts.connect() as connection:
+        connection.execute(
+            "UPDATE runs SET mission_review_required=0, source_evidence_version=0 "
+            "WHERE id=?", (run.id,),
+        )
+    worker = Worker(facts.path, provider=provider, owner="worker-a")
+    assert worker.run_once()
+
+    with facts.connect() as connection:
+        row = connection.execute(
+            "SELECT input_hash FROM node_executions WHERE run_id=? AND node='mission' "
+            "AND status='COMMITTED' ORDER BY rowid DESC LIMIT 1",
+            (run.id,),
+        ).fetchone()
+    assert row is not None and row["input_hash"]
+
+    calls = provider.mission_calls
+    commands = worker.execution
+    commands.expire_for_test(run.id)
+    epoch = commands.acquire(run.id, "worker-b")
+    runner = worker.runner
+    runner._execution = commands
+    runner._execution_owner = "worker-b"
+    runner._execution_epoch = epoch
+    runner._execution_command_id = "reuse-check"
+    runner._recovery_effect = None
+    try:
+        decision = runner._node_started(
+            "mission", GraphState(run_id=run.id, current_node="mission"),
+        )
+    finally:
+        runner._execution = None
+        runner._execution_owner = None
+        runner._execution_epoch = None
+        runner._execution_command_id = None
+
+    assert decision.action == "reuse"
+    assert provider.mission_calls == calls
+    with facts.connect() as connection:
+        reused = connection.execute(
+            "SELECT COUNT(*) FROM events WHERE run_id=? AND type='node.reused'",
+            (run.id,),
+        ).fetchone()[0]
+    assert reused == 1

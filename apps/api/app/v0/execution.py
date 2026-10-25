@@ -32,6 +32,7 @@ CommandKind = Literal[
     "SOURCE_REVIEW",
 ]
 CommandStatus = Literal["ACCEPTED", "CLAIMED", "APPLIED", "FAILED", "REJECTED"]
+MAX_NODE_INPUT_FAILURES = 3
 
 
 def _utc() -> datetime:
@@ -61,6 +62,20 @@ class CommandView(BaseModel):
     kind: CommandKind
     status: CommandStatus
     error: str | None = None
+
+
+class NodeClaim(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: Literal["reused", "busy", "claimed", "blocked"]
+    execution_id: str | None = None
+    attempt: int | None = None
+    checkpoint_id: str | None = None
+    lease_epoch: int | None = None
+    source_execution_id: str | None = None
+    source_checkpoint_id: str | None = None
+    after_state: GraphState | None = None
+    reason: str | None = None
 
 
 class CheckpointView(BaseModel):
@@ -775,11 +790,21 @@ class ExecutionStore:
         )
         return checkpoint_id
 
-    def start_node(
-        self, run_id: str, node: str, state: GraphState, owner: str, epoch: int,
+    def claim_node_execution(
+        self,
+        run_id: str,
+        node: str,
+        state: GraphState,
+        owner: str,
+        epoch: int,
+        *,
+        input_hash: str | None,
+        reuse_enabled: bool,
+        retry_override: bool = False,
         recovery_event_id: int | None = None,
         command_id: str | None = None,
-    ) -> str:
+    ) -> NodeClaim:
+        now = _utc().isoformat()
         with self.facts.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._require_lease(connection, run_id, owner, epoch)
@@ -787,22 +812,111 @@ class ExecutionStore:
                 "SELECT stop_requested FROM run_controls WHERE run_id=?", (run_id,)
             ).fetchone()
             if control and control["stop_requested"]:
-                raise StopRequested("STOP 已受理，禁止开始下一节点")
+                return NodeClaim(outcome="blocked", reason="stop_requested")
             tokens_used, token_limit, _ = BudgetStore.token_state(connection, run_id)
             latest_attempt = connection.execute(
                 "SELECT status FROM node_executions WHERE run_id=? AND node=? "
                 "ORDER BY rowid DESC LIMIT 1",
                 (run_id, node),
             ).fetchone()
-            recovering_started_node = bool(
+            recovering_started = bool(
                 latest_attempt and latest_attempt["status"] == "STARTED"
             )
             if (
                 token_limit is not None
                 and tokens_used >= token_limit
-                and not recovering_started_node
+                and not recovering_started
             ):
                 raise TokenLimitReached(tokens_used, token_limit, node)
+            lookup = reuse_enabled and input_hash is not None
+            if lookup:
+                live = connection.execute(
+                    "SELECT * FROM node_executions WHERE run_id=? AND node=? "
+                    "AND input_hash=? AND status='STARTED' ORDER BY rowid DESC",
+                    (run_id, node, input_hash),
+                ).fetchall()
+                for row in live:
+                    if row["lease_epoch"] == epoch:
+                        return NodeClaim(
+                            outcome="busy", execution_id=row["id"],
+                            lease_epoch=epoch,
+                        )
+                if not retry_override:
+                    for row in connection.execute(
+                        "SELECT * FROM node_executions WHERE run_id=? AND node=? "
+                        "AND input_hash=? AND status='COMMITTED' "
+                        "ORDER BY rowid DESC",
+                        (run_id, node, input_hash),
+                    ).fetchall():
+                        if not row["after_checkpoint_id"]:
+                            continue
+                        checkpoint = connection.execute(
+                            "SELECT state_json FROM checkpoints WHERE id=?",
+                            (row["after_checkpoint_id"],),
+                        ).fetchone()
+                        if checkpoint is None:
+                            continue
+                        after = GraphState.model_validate_json(
+                            checkpoint["state_json"]
+                        )
+                        if after.last_outcome != "succeeded":
+                            continue
+                        run_row = connection.execute(
+                            "SELECT status FROM runs WHERE id=?", (run_id,)
+                        ).fetchone()
+                        connection.execute(
+                            "INSERT INTO events(run_id, stage, type, status, "
+                            "input_summary, output_summary, request_key, "
+                            "request_hash, created_at) VALUES (?, ?, "
+                            "'node.reused', ?, ?, ?, ?, ?, ?)",
+                            (
+                                run_id, node,
+                                run_row["status"] if run_row else "unknown",
+                                "复用相同输入的已完成节点结果",
+                                str(row["id"]), row["id"], input_hash, now,
+                            ),
+                        )
+                        return NodeClaim(
+                            outcome="reused",
+                            source_execution_id=row["id"],
+                            source_checkpoint_id=row["after_checkpoint_id"],
+                            after_state=after,
+                        )
+                for row in live:
+                    if row["lease_epoch"] < epoch:
+                        connection.execute(
+                            "UPDATE node_executions SET status='FAILED', "
+                            "error='lease_expired_takeover', "
+                            "failure_class='transient', updated_at=? "
+                            "WHERE id=? AND status='STARTED'",
+                            (now, row["id"]),
+                        )
+                failures = connection.execute(
+                    "SELECT COUNT(*) FROM node_executions WHERE run_id=? AND node=? "
+                    "AND input_hash=? AND status='FAILED'",
+                    (run_id, node, input_hash),
+                ).fetchone()[0]
+                if failures:
+                    latest_failed = connection.execute(
+                        "SELECT * FROM node_executions WHERE run_id=? AND node=? "
+                        "AND input_hash=? AND status='FAILED' "
+                        "ORDER BY rowid DESC LIMIT 1",
+                        (run_id, node, input_hash),
+                    ).fetchone()
+                    if not retry_override:
+                        if failures >= MAX_NODE_INPUT_FAILURES:
+                            return NodeClaim(
+                                outcome="blocked",
+                                reason="max_attempts_reached",
+                            )
+                        if latest_failed["failure_class"] != "transient":
+                            return NodeClaim(
+                                outcome="blocked",
+                                reason=(
+                                    "retry_denied:"
+                                    f"{latest_failed['failure_class'] or 'unknown'}"
+                                ),
+                            )
             attempt = connection.execute(
                 "SELECT COUNT(*) FROM node_executions WHERE run_id=? AND node=?",
                 (run_id, node),
@@ -812,18 +926,45 @@ class ExecutionStore:
                 connection, run_id, execution_id, "before_node", state,
                 recovery_event_id,
             )
-            now = _utc().isoformat()
             connection.execute(
-                "INSERT INTO node_executions VALUES (?, ?, ?, ?, ?, 'STARTED', "
-                "?, NULL, NULL, ?, ?, ?)",
-                (execution_id, run_id, node, attempt, epoch, checkpoint_id, now, now,
-                 command_id),
+                "INSERT INTO node_executions("
+                "id, run_id, node, attempt, lease_epoch, status, "
+                "before_checkpoint_id, after_checkpoint_id, error, created_at, "
+                "updated_at, command_id, input_hash, failure_class) "
+                "VALUES (?, ?, ?, ?, ?, 'STARTED', ?, NULL, NULL, ?, ?, ?, ?, NULL)",
+                (
+                    execution_id, run_id, node, attempt, epoch, checkpoint_id,
+                    now, now, command_id, input_hash,
+                ),
             )
-            return execution_id
+            return NodeClaim(
+                outcome="claimed",
+                execution_id=execution_id,
+                attempt=attempt,
+                checkpoint_id=checkpoint_id,
+                lease_epoch=epoch,
+            )
+
+    def start_node(
+        self, run_id: str, node: str, state: GraphState, owner: str, epoch: int,
+        recovery_event_id: int | None = None,
+        command_id: str | None = None,
+    ) -> str:
+        claim = self.claim_node_execution(
+            run_id, node, state, owner, epoch, input_hash=None,
+            reuse_enabled=False, recovery_event_id=recovery_event_id,
+            command_id=command_id,
+        )
+        if claim.outcome == "blocked" and claim.reason == "stop_requested":
+            raise StopRequested("STOP 已受理，禁止开始下一节点")
+        if claim.outcome != "claimed" or claim.execution_id is None:
+            raise ValueError(f"Node 领取失败：{claim.outcome}")
+        return claim.execution_id
 
     def finish_node(
         self, execution_id: str, state: GraphState, owner: str, epoch: int,
         *, failed: bool = False, error: str | None = None,
+        failure_class: str | None = None,
     ) -> None:
         with self.facts.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -838,10 +979,13 @@ class ExecutionStore:
             )
             connection.execute(
                 "UPDATE node_executions SET status=?, after_checkpoint_id=?, "
-                "error=?, lease_epoch=?, updated_at=? WHERE id=?",
-                ("FAILED" if failed else "COMMITTED", checkpoint_id,
-                 error[:200] if error else None, epoch,
-                 _utc().isoformat(), execution_id),
+                "error=?, lease_epoch=?, failure_class=?, updated_at=? WHERE id=?",
+                (
+                    "FAILED" if failed else "COMMITTED", checkpoint_id,
+                    error[:200] if error else None, epoch,
+                    (failure_class or "unknown") if failed else None,
+                    _utc().isoformat(), execution_id,
+                ),
             )
 
     def stop_requested(self, run_id: str) -> bool:
