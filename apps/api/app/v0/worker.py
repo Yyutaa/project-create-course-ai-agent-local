@@ -264,6 +264,10 @@ class Worker:
                 return
             if not decision["resume"]:
                 return
+            if run.langgraph_flow_version == 1:
+                # The gate is no longer waiting on this interrupt; the
+                # Command is a replay or stale review.
+                return
             checkpoint = self.execution.last_checkpoint(run_id)
             if (
                 decision.get("replayed") and checkpoint is not None
@@ -326,6 +330,9 @@ class Worker:
                     self._mark_token_stopped(run_id, epoch, error)
                 if self.runner.get(run_id).status == "failed":
                     raise RuntimeError("Graph 节点业务失败；不自动重试")
+                return
+            if run.langgraph_flow_version == 1:
+                # The quality gate is no longer waiting on this interrupt.
                 return
             state = self._resume_state(run_id)
             if state is None:
