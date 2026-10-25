@@ -428,7 +428,12 @@ def test_human_revision_can_approve_exactly_twenty_more_calls(tmp_path):
         CourseInput(topic="变量", audience="初学者", goal="解释变量", language="zh"),
         "create", enqueue_start=True,
     )
+    with facts.connect() as connection:
+        connection.execute(
+            "UPDATE runs SET langgraph_flow_version=0 WHERE id=?", (run.id,),
+        )
     execution = ExecutionStore(facts.path)
+    execution.accept(run.id, "START", {}, "seed-checkpoint")
     epoch = execution.acquire(run.id, "worker-a")
     waiting = facts.get_run(run.id)
     waiting.status = "waiting_for_human"

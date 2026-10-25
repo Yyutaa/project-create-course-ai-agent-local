@@ -53,7 +53,7 @@ def test_new_run_persists_planning_policy_and_migrated_run_defaults_to_legacy(tm
     run, _ = facts.create_run(CourseInput(
         topic="变量", audience="初学者", goal="完成课程", language="zh",
     ), "new-policy")
-    assert facts.schema_version() == 19
+    assert facts.schema_version() == 20
     assert facts.get_run(run.id).planning_loop_version == 1
     with facts.connect() as connection:
         connection.execute("UPDATE runs SET planning_loop_version=0 WHERE id=?", (run.id,))
@@ -73,7 +73,7 @@ def test_v12_migration_defaults_existing_run_to_legacy_and_is_repeatable(tmp_pat
         connection.execute("PRAGMA user_version=12")
     facts.migrate()
     facts.migrate()
-    assert facts.schema_version() == 19
+    assert facts.schema_version() == 20
     assert facts.get_run(run.id).planning_loop_version == 0
 
 
@@ -326,7 +326,11 @@ def test_worker_takeover_reuses_committed_replan_fact(tmp_path, crash_at):
         first.runner._node_finished = crash_after_artifact
     with pytest.raises((RuntimeError, KeyboardInterrupt), match="simulated crash"):
         first._apply(command, epoch)
-    assert commands.last_checkpoint(run_id)["position"] == "after_artifact"
+    assert commands.last_checkpoint(run_id)["position"] == "after_node"
+    with facts.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE run_id=?", (run_id,),
+        ).fetchone()[0] == 0
     commands.expire_for_test(run_id)
     second = Worker(facts.path, provider=provider, owner="worker-b")
     assert second.run_once()

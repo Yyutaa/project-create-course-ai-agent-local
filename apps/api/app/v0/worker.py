@@ -365,10 +365,8 @@ class Worker:
             if run.status == "failed":
                 raise RuntimeError("Graph 节点业务失败；不自动重试")
             raise ValueError("START 不允许从业务失败或终态重试")
-        checkpoint = self.execution.last_checkpoint(run_id)
         if (
-            checkpoint is None
-            and self.runner.get(run_id).langgraph_flow_version == 1
+            self.runner.get(run_id).langgraph_flow_version == 1
             and self._langgraph_has_pending_task(run_id)
         ):
             try:

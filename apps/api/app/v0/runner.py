@@ -204,6 +204,8 @@ class V0Runner:
                 self._execution_state = self._execution_state.model_copy(
                     update={"artifact_refs": refs}
                 )
+                if self.store is not None:
+                    self.store.sync_projection(run)
                 return
         if self.store is not None:
             run = self.store.record(

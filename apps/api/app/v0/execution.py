@@ -165,7 +165,8 @@ class ExecutionStore:
                     raise ValueError("Idempotency-Key 已用于不同 Command")
                 return self._command(existing)
             run = connection.execute(
-                "SELECT status FROM runs WHERE id=?", (run_id,)
+                "SELECT status, langgraph_flow_version FROM runs WHERE id=?",
+                (run_id,),
             ).fetchone()
             if run is None:
                 raise KeyError(run_id)
@@ -179,9 +180,13 @@ class ExecutionStore:
             connection.execute(
                 "INSERT OR IGNORE INTO run_controls(run_id) VALUES (?)", (run_id,)
             )
-            if kind == "START" and connection.execute(
-                "SELECT 1 FROM checkpoints WHERE run_id=? LIMIT 1", (run_id,)
-            ).fetchone() is None:
+            if (
+                kind == "START"
+                and run["langgraph_flow_version"] == 0
+                and connection.execute(
+                    "SELECT 1 FROM checkpoints WHERE run_id=? LIMIT 1", (run_id,)
+                ).fetchone() is None
+            ):
                 self._checkpoint(
                     connection, run_id, None, "before_node", GraphState(run_id=run_id)
                 )
@@ -776,7 +781,7 @@ class ExecutionStore:
                 ),
             ).lastrowid
             run.revision = event_id
-            if technical_retry:
+            if run.langgraph_flow_version == 0 and technical_retry:
                 retry_state = state.model_copy(update={
                     "last_outcome": "waiting_for_human",
                     "exit_reason": "reviewer_output_retry_requested",
@@ -784,7 +789,10 @@ class ExecutionStore:
                 self._checkpoint(
                     connection, command.run_id, None, "after_node", retry_state, event_id,
                 )
-            if action == "accept" and context == "verification":
+            if (
+                run.langgraph_flow_version == 0
+                and action == "accept" and context == "verification"
+            ):
                 refs = dict(state.artifact_refs)
                 refs[f"lesson:{lesson_id}"] = lesson_ref
                 decision_state = state.model_copy(update={
@@ -842,6 +850,10 @@ class ExecutionStore:
             ).fetchone()
             if control and control["stop_requested"]:
                 return NodeClaim(outcome="blocked", reason="stop_requested")
+            flow = connection.execute(
+                "SELECT langgraph_flow_version FROM runs WHERE id=?", (run_id,)
+            ).fetchone()
+            new_flow = bool(flow and flow["langgraph_flow_version"] == 1)
             tokens_used, token_limit, _ = BudgetStore.token_state(connection, run_id)
             latest_attempt = connection.execute(
                 "SELECT status FROM node_executions WHERE run_id=? AND node=? "
@@ -870,7 +882,7 @@ class ExecutionStore:
                             outcome="blocked",
                             reason="interrupt_input_changed",
                         )
-                    checkpoint_id = self._checkpoint(
+                    checkpoint_id = None if new_flow else self._checkpoint(
                         connection, run_id, waiting["id"], "before_node", state,
                     )
                     connection.execute(
@@ -909,18 +921,21 @@ class ExecutionStore:
                         "ORDER BY rowid DESC",
                         (run_id, node, input_hash),
                     ).fetchall():
-                        if not row["after_checkpoint_id"]:
-                            continue
-                        checkpoint = connection.execute(
-                            "SELECT state_json FROM checkpoints WHERE id=?",
-                            (row["after_checkpoint_id"],),
-                        ).fetchone()
-                        if checkpoint is None:
-                            continue
-                        after = GraphState.model_validate_json(
-                            checkpoint["state_json"]
-                        )
-                        if after.last_outcome != "succeeded":
+                        after = None
+                        if row["after_checkpoint_id"]:
+                            checkpoint = connection.execute(
+                                "SELECT state_json FROM checkpoints WHERE id=?",
+                                (row["after_checkpoint_id"],),
+                            ).fetchone()
+                            if checkpoint is not None:
+                                after = GraphState.model_validate_json(
+                                    checkpoint["state_json"]
+                                )
+                        elif row["after_state_json"]:
+                            after = GraphState.model_validate_json(
+                                row["after_state_json"]
+                            )
+                        if after is None or after.last_outcome != "succeeded":
                             continue
                         run_row = connection.execute(
                             "SELECT status FROM runs WHERE id=?", (run_id,)
@@ -985,7 +1000,7 @@ class ExecutionStore:
                 (run_id, node),
             ).fetchone()[0] + 1
             execution_id = uuid4().hex
-            checkpoint_id = self._checkpoint(
+            checkpoint_id = None if new_flow else self._checkpoint(
                 connection, run_id, execution_id, "before_node", state,
                 recovery_event_id,
             )
@@ -1032,20 +1047,26 @@ class ExecutionStore:
         with self.facts.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT run_id, status FROM node_executions WHERE id=?", (execution_id,)
+                "SELECT n.run_id, n.status, r.langgraph_flow_version "
+                "FROM node_executions n JOIN runs r ON r.id=n.run_id WHERE n.id=?",
+                (execution_id,),
             ).fetchone()
             if row is None or row["status"] != "STARTED":
                 raise ValueError("NodeExecution 状态不允许提交")
             self._require_lease(connection, row["run_id"], owner, epoch)
-            checkpoint_id = self._checkpoint(
-                connection, row["run_id"], execution_id, "after_node", state
+            checkpoint_id = (
+                None if row["langgraph_flow_version"] == 1
+                else self._checkpoint(
+                    connection, row["run_id"], execution_id, "after_node", state
+                )
             )
             connection.execute(
                 "UPDATE node_executions SET status=?, after_checkpoint_id=?, "
-                "error=?, lease_epoch=?, failure_class=?, "
+                "after_state_json=?, error=?, lease_epoch=?, failure_class=?, "
                 "pending_interrupt_id=NULL, updated_at=? WHERE id=?",
                 (
                     "FAILED" if failed else "COMMITTED", checkpoint_id,
+                    state.model_dump_json(),
                     error[:200] if error else None, epoch,
                     (failure_class or "unknown") if failed else None,
                     _utc().isoformat(), execution_id,
@@ -1059,22 +1080,27 @@ class ExecutionStore:
         with self.facts.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT run_id, status FROM node_executions WHERE id=?",
+                "SELECT n.run_id, n.status, r.langgraph_flow_version "
+                "FROM node_executions n JOIN runs r ON r.id=n.run_id WHERE n.id=?",
                 (execution_id,),
             ).fetchone()
             if row is None or row["status"] != "STARTED":
                 raise ValueError("NodeExecution 状态不允许等待")
             self._require_lease(connection, row["run_id"], owner, epoch)
-            checkpoint_id = self._checkpoint(
-                connection, row["run_id"], execution_id, "after_node", state,
+            checkpoint_id = (
+                None if row["langgraph_flow_version"] == 1
+                else self._checkpoint(
+                    connection, row["run_id"], execution_id, "after_node", state,
+                )
             )
             connection.execute(
                 "UPDATE node_executions SET status='WAITING', "
-                "after_checkpoint_id=?, error=?, lease_epoch=?, "
+                "after_checkpoint_id=?, after_state_json=?, error=?, lease_epoch=?, "
                 "failure_class=NULL, pending_interrupt_id=?, "
                 "waiting_state_json=?, updated_at=? WHERE id=?",
                 (
-                    checkpoint_id, reason[:200], epoch, pending_interrupt_id,
+                    checkpoint_id, state.model_dump_json(),
+                    reason[:200], epoch, pending_interrupt_id,
                     state.model_dump_json(), _utc().isoformat(), execution_id,
                 ),
             )
@@ -1262,6 +1288,11 @@ class ExecutionStore:
             ).fetchone()
         if token_stopped:
             raise ValueError("Token 阈值已终止 Run，不能 RESUME")
+        if (
+            run.langgraph_flow_version == 1
+            and self.waiting_interrupt_id(run_id) is not None
+        ):
+            raise ValueError("人工 Gate 等待决策，不能由 RESUME 替代")
         checkpoint = self.last_checkpoint(run_id)
         if checkpoint is None:
             raise ValueError("RESUME 缺少合法 checkpoint")
@@ -1478,6 +1509,38 @@ class ExecutionStore:
         })
 
     def last_checkpoint(self, run_id: str) -> dict | None:
+        with self.facts.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM checkpoints WHERE run_id=? ORDER BY rowid DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if row is not None:
+                return dict(row)
+            run = connection.execute(
+                "SELECT langgraph_flow_version FROM runs WHERE id=?", (run_id,)
+            ).fetchone()
+            if run is None or run["langgraph_flow_version"] != 1:
+                return None
+            node = connection.execute(
+                "SELECT id, waiting_state_json, after_state_json "
+                "FROM node_executions WHERE run_id=? AND ("
+                "waiting_state_json IS NOT NULL OR after_state_json IS NOT NULL) "
+                "ORDER BY rowid DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if node is None:
+                return None
+            return {
+                "id": node["id"],
+                "node_execution_id": node["id"],
+                "position": "after_node",
+                "state_json": (
+                    node["waiting_state_json"] or node["after_state_json"]
+                ),
+                "event_id": None,
+            }
+
+    def last_custom_checkpoint(self, run_id: str) -> dict | None:
         with self.facts.connect() as connection:
             row = connection.execute(
                 "SELECT * FROM checkpoints WHERE run_id=? ORDER BY rowid DESC LIMIT 1",

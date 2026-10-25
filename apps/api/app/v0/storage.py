@@ -77,6 +77,14 @@ class FactStore:
             return row[0]
 
     def migrate(self) -> None:
+        self._migrate_legacy()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if version == 19:
+                self._migrate_v20(connection)
+
+    def _migrate_legacy(self) -> None:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
@@ -713,6 +721,22 @@ class FactStore:
                 )
         connection.execute("PRAGMA user_version=19")
 
+    @staticmethod
+    def _migrate_v20(connection: sqlite3.Connection) -> None:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='node_executions'"
+        ).fetchone()
+        if exists:
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(node_executions)")
+            }
+            if "after_state_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE node_executions ADD COLUMN after_state_json TEXT"
+                )
+        connection.execute("PRAGMA user_version=20")
+
     def mission_review_required(self, run_id: str) -> bool:
         with self.connect() as connection:
             row = connection.execute(
@@ -801,11 +825,6 @@ class FactStore:
                     )
                     connection.execute(
                         "INSERT INTO run_controls(run_id) VALUES (?)", (run_id,)
-                    )
-                    connection.execute(
-                        "INSERT INTO checkpoints VALUES (?, ?, NULL, 'before_node', "
-                        "?, NULL, ?)",
-                        (uuid4().hex, run_id, GraphState(run_id=run_id).model_dump_json(), now),
                     )
             except Exception:
                 workspace.rmdir()
@@ -1043,6 +1062,27 @@ class FactStore:
                 )
             )
 
+    def sync_projection(self, run: V0Run) -> V0Run:
+        """Persist in-memory Run state without appending an Event or Artifact.
+
+        Used when an idempotent effect hit replays a stage transition whose
+        Event/Artifact already exists (for example a node resumed after a
+        crash). Snapshot triggers still advance the Run change sequence.
+        """
+        now = _now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "UPDATE runs SET status=?, updated_at=? WHERE id=?",
+                (run.status, now, run.id),
+            )
+            connection.execute(
+                "UPDATE snapshots SET projection_json=?, updated_at=? "
+                "WHERE run_id=?",
+                (run.model_dump_json(), now, run.id),
+            )
+        return run
+
     def record(
         self,
         run: V0Run,
@@ -1213,7 +1253,10 @@ class FactStore:
                             artifact_id, version, content_hash, now,
                         ),
                     )
-                if node_execution_id and checkpoint_state:
+                if (
+                    run.langgraph_flow_version == 0
+                    and node_execution_id and checkpoint_state
+                ):
                     refs = dict(checkpoint_state.artifact_refs)
                     if artifact is not None:
                         key = "candidate" if event_type == "candidate.created" else (

@@ -97,6 +97,10 @@ def test_mission_gate_interrupts_and_approval_resumes(tmp_path):
         ).fetchone()
     assert execution["status"] == "WAITING"
     assert execution["input_hash"]
+    with facts.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE run_id=?", (run.id,),
+        ).fetchone()[0] == 0
 
     review = commands.read_model(run.id).mission_review
     assert review is not None and review.status == "pending"
