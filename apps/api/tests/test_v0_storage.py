@@ -16,7 +16,7 @@ def test_migration_is_repeatable_and_preserves_rows(tmp_path):
             ("c1", "第一门课", "c1", "2026-09-22T00:00:00Z"),
         )
     store.migrate()
-    assert store.schema_version() == 14
+    assert store.schema_version() == 15
     with store.connect() as connection:
         assert (
             connection.execute("SELECT title FROM courses WHERE id='c1'").fetchone()[0]
@@ -35,7 +35,7 @@ def test_v14_migration_preserves_existing_runs_and_versions_new_runs(tmp_path):
     store.migrate()
     store.migrate()
 
-    assert store.schema_version() == 14
+    assert store.schema_version() == 15
     with store.connect() as connection:
         assert connection.execute(
             "SELECT context_contract_version FROM runs WHERE id='old-run'"
@@ -110,7 +110,7 @@ def test_v7_migration_preserves_legacy_run_without_enabling_constraints(tmp_path
     store.migrate()
     store.migrate()
 
-    assert store.schema_version() == 14
+    assert store.schema_version() == 15
     with store.connect() as connection:
         run = connection.execute(
             "SELECT constraints_version FROM runs WHERE id='legacy-run'"
@@ -209,7 +209,7 @@ def test_migration_upgrades_v1_artifacts_without_inventing_provenance(tmp_path):
     store = storage.FactStore(path)
     store.migrate()
 
-    assert store.schema_version() == 14
+    assert store.schema_version() == 15
     with store.connect() as connection:
         columns = {
             row[1] for row in connection.execute("PRAGMA table_info(artifacts)").fetchall()
@@ -296,7 +296,7 @@ def test_v2_database_upgrades_to_execution_protocol_without_recreating_runs(tmp_
     store.migrate()
 
     with store.connect() as connection:
-        assert store.schema_version() == 14
+        assert store.schema_version() == 15
         assert connection.execute("SELECT id FROM runs").fetchone()[0] == "existing-run"
         assert connection.execute(
             "SELECT mission_review_required FROM runs WHERE id='existing-run'"
@@ -304,3 +304,42 @@ def test_v2_database_upgrades_to_execution_protocol_without_recreating_runs(tmp_
         assert connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='commands'"
         ).fetchone()[0] == "commands"
+
+
+def test_v15_migration_adds_node_input_columns_and_preserves_rows(tmp_path):
+    path = tmp_path / "facts.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE node_executions (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, "
+            "node TEXT NOT NULL, attempt INTEGER NOT NULL, lease_epoch INTEGER NOT NULL, "
+            "status TEXT NOT NULL, before_checkpoint_id TEXT, after_checkpoint_id TEXT, "
+            "error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO node_executions VALUES "
+            "('old', 'run-1', 'mission', 1, 1, 'COMMITTED', NULL, NULL, NULL, "
+            "'now', 'now')"
+        )
+        connection.execute("PRAGMA user_version=14")
+
+    store = storage.FactStore(path)
+    store.migrate()
+    store.migrate()
+
+    assert store.schema_version() == 15
+    with store.connect() as connection:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(node_executions)")
+        }
+        row = connection.execute(
+            "SELECT input_hash, failure_class FROM node_executions WHERE id='old'"
+        ).fetchone()
+        index = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' "
+            "AND name='node_executions_by_input'"
+        ).fetchone()
+    assert {"input_hash", "failure_class"} <= columns
+    assert row["input_hash"] is None
+    assert row["failure_class"] is None
+    assert index is not None
