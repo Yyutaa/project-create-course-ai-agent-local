@@ -241,8 +241,24 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
   与 NodeExecution `input_hash`，不依赖自定义 checkpoint state；不一致时拒绝恢复，
   避免旧中断被新输入错误接管。
 - 只接受 `approve` / `revise`；`revise` 回到 mission 重新生成并再次 interrupt。
-- Quality / Source / Release gate 尚未迁移，仍保留原执行路径。
+- Quality / Source / Release gate 已迁移，见下节。
 - SQLite schema 17：`runs.langgraph_flow_version`、`node_executions.pending_interrupt_id`。
+
+### LangGraph Quality / Source / Release gate
+
+- Quality / Verification 人工复核由独立 `quality_gate` 节点 `interrupt()`；新 Run 的
+  `QUALITY_REVIEW accept/retry` 通过 `Command(resume={action, reason})` 恢复。
+  Reviewer schema 失败的技术重试仍保留既有自定义路径，暂不进入 gate。
+- 来源不足由独立 `source_gate` 节点 `interrupt()`；`SOURCE_REVIEW approve/retry_search`
+  通过 `Command(resume=...)` 返回 blueprint/generation 重试。`reject` / `propose_url`
+  不恢复 Graph，继续停留在来源等待态。
+- 全部章节通过质量 Gate 后，新 Run 进入独立 `release_gate` 节点 `interrupt()`；
+  `POST /release` 通过 `Command(resume={action, reason})` 恢复，仍由人工决定
+  prepare/stop；publish 保持独立同步动作。
+- 四类 gate 的中断都写入 NodeExecution `WAITING` 与 `pending_interrupt_id`，
+  resume 前校验 interrupt id 与 `input_hash`。
+- Quality/Source/Release gate 只对新 Run（`langgraph_flow_version=1`）启用；
+  旧 Run 与自定义 `_resume_state` 路径保持原行为。
 
 ### 执行协议检查项与待办（2026-10-25）
 
@@ -253,6 +269,7 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 | 租约/心跳 | 通过 | 实现完整；心跳续租缺少直接测试 |
 | thread_id | 已实现（双写） | LangGraph SqliteSaver 以 `thread_id=run_id` 记录图状态；自定义 checkpoint 仍是执行权威 |
 | Mission gate | 试点通过 | 新 Run 使用 `mission_gate` interrupt + `Command(resume)`；旧 Run 保留自定义路径 |
+| Quality/Source/Release gate | 试点通过 | 新 Run 使用 `quality_gate` / `source_gate` / `release_gate` interrupt + resume；旧 Run 保留自定义路径 |
 | 恢复 | 通过 | 从最近 checkpoint 继续，已完成节点不重跑 |
 
 待执行 TODO：
@@ -261,9 +278,11 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 - [ ] 补心跳续租测试：断言 Worker 每 15 秒延长 Run lease 与 Command `claimed_until`
 - [x] thread_id 决策：接入 LangGraph SqliteSaver 双写，`thread_id=run_id`；自定义 checkpoint 保持权威
 - [x] Mission gate 节点级接管试点：新 Run 默认启用，旧 Run 保持自定义路径
-- [ ] 迁移 Quality / Source / Release gate 到 interrupt/resume
+- [x] Quality / Source / Release gate 迁移到 interrupt/resume（技术重试例外）
 - [ ] 补 Graph 层 `TokenPreflightError → waiting_for_human` 的原因码测试
 - [ ] 补 tokenizer 缺失/损坏时 fail-closed 的 Provider 调用计数测试
+- [ ] 建立 effect 幂等账本，替换新 Run 的 recover_quality/recover_repair/recover_verification
+- [ ] 新 Run 停止写自定义 checkpoints，移除 _resume_state 新分支；旧 Run 清零后删表
 - [ ] 评估 Provider 单次调用结果缓存（input_hash 的更细粒度复用）
 - [ ] 明确不支持 Lesson 行/段/Token 级断点续传，仅支持节点与 Artifact 级恢复
 
