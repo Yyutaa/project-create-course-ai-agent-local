@@ -1075,6 +1075,88 @@ def test_new_context_run_resumes_from_langgraph_without_custom_checkpoint(tmp_pa
     assert commands.list_commands(run.id)[0].status == "APPLIED"
 
 
+class RepairThenPass(FakeProvider):
+    def __init__(self):
+        super().__init__()
+        self.reviewer_calls = 0
+
+    def invoke(self, request):
+        if request.role == "reviewer":
+            self.reviewer_calls += 1
+            if self.reviewer_calls == 1:
+                return AgentResponse(role="reviewer", payload={
+                    "status": "manual_review",
+                    "checks": ["练习与学习目标不匹配"],
+                    "findings": [{
+                        "code": "teaching.practice",
+                        "category": "teaching",
+                        "severity": "major",
+                        "evidence": "变量保存一个值",
+                        "recommendation": "补充与目标匹配的练习",
+                    }],
+                    "language_risk": "需人工复读",
+                    "limitations": ["未核验事实来源"],
+                })
+        if request.role == "repair":
+            return AgentResponse(role="repair", payload={
+                "title": "Python 变量入门",
+                "markdown": (
+                    "变量保存一个值，例如 `name = '小林'`，"
+                    "打印后会看到「小林」。"
+                ),
+            })
+        return super().invoke(request)
+
+
+def test_verification_resume_does_not_duplicate_accept_event(tmp_path):
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(CourseInput(
+        topic="变量", audience="初学者", goal="完成一章", language="zh",
+        expected_chapters=1, min_effective_chars=1,
+    ), "verification-resume", enqueue_start=True)
+    with facts.connect() as connection:
+        connection.execute(
+            "UPDATE runs SET mission_review_required=0, source_evidence_version=0 "
+            "WHERE id=?", (run.id,),
+        )
+        connection.execute("DELETE FROM snapshots WHERE run_id=?", (run.id,))
+
+    provider = RepairThenPass()
+    first = Worker(facts.path, provider=provider, owner="worker-a")
+    accept = first.runner._accept_repair_candidate
+
+    def crash_after_accept(run_id, reference):
+        accept(run_id, reference)
+        raise SystemExit("simulated process death")
+
+    first.runner._accept_repair_candidate = crash_after_accept
+    with pytest.raises(SystemExit, match="process death"):
+        first.run_once()
+
+    commands = first.execution
+    with facts.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE run_id=?", (run.id,),
+        ).fetchone()[0] == 0
+    commands.expire_for_test(run.id)
+
+    assert Worker(
+        facts.path, provider=provider, owner="worker-b",
+    ).run_once()
+    with facts.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM events WHERE run_id=? "
+            "AND type='candidate.accepted'", (run.id,),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE run_id=?", (run.id,),
+        ).fetchone()[0] == 0
+    resumed = facts.get_run(run.id)
+    assert resumed.stages[5].status == "succeeded"
+    assert resumed.status == "waiting_for_human"
+
+
 def test_crash_after_human_wait_is_reconciled_without_rerunning_graph(stores):
     facts, commands, run_id = stores
     commands.accept(run_id, "START", {}, "start-1")

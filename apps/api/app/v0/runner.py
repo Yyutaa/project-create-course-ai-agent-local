@@ -305,6 +305,10 @@ class V0Runner:
                 or record.producer_role != "repair"
             ):
                 raise ValueError("Candidate 引用无效")
+            if self.store is not None and self.store.has_artifact_event(
+                run_id, "candidate.accepted", reference
+            ):
+                return
             from app.v0.schemas import LessonDraft
 
             run = self._current(run_id)
@@ -321,6 +325,10 @@ class V0Runner:
             record = self._load_artifact(reference.artifact_id, reference.version)
             if record.run_id != run_id or record.content_hash != reference.content_hash:
                 raise ValueError("Candidate 引用无效")
+            if self.store is not None and self.store.has_artifact_event(
+                run_id, "candidate.rejected", reference
+            ):
+                return
             self._commit(
                 self._current(run_id),
                 "candidate.rejected",
