@@ -228,6 +228,21 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 - 现有 `checkpoints` 表与 LangGraph 的 `checkpoints` 表位于不同 SQLite 文件，
   schema 不共享。
 
+### LangGraph Mission gate（试点）
+
+- 新 Run 默认 `langgraph_flow_version=1`；旧 Run 为 0，继续走自定义
+  `_resume_state` 路径。
+- 新 Run 的 Mission 人工确认由独立 `mission_gate` 节点 `interrupt()`；
+  `mission` 节点只负责生成 Mission，不再自行进入等待。
+- gate 中断后 NodeExecution 进入 `WAITING`，并写自定义 `after_node` checkpoint；
+  恢复通过 `Command(resume={action, feedback})`，不使用 interrupt 期间的
+  `update_state()`。
+- 恢复前校验 pending interrupt id 与 NodeExecution `input_hash`；不一致时
+  拒绝恢复，避免旧中断被新输入错误接管。
+- 只接受 `approve` / `revise`；`revise` 回到 mission 重新生成并再次 interrupt。
+- Quality / Source / Release gate 尚未迁移，仍保留原执行路径。
+- SQLite schema 16：`runs.langgraph_flow_version`。
+
 ### 执行协议检查项与待办（2026-10-25）
 
 | 检查项 | 状态 | 说明 |
@@ -236,6 +251,7 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 | 输入哈希 | 已实现 | 仅 NodeExecution 级 input_hash + 分类重试，见 `docs/superpowers/specs/2026-10-25-node-execution-input-hash-design.md` |
 | 租约/心跳 | 通过 | 实现完整；心跳续租缺少直接测试 |
 | thread_id | 已实现（双写） | LangGraph SqliteSaver 以 `thread_id=run_id` 记录图状态；自定义 checkpoint 仍是执行权威 |
+| Mission gate | 试点通过 | 新 Run 使用 `mission_gate` interrupt + `Command(resume)`；旧 Run 保留自定义路径 |
 | 恢复 | 通过 | 从最近 checkpoint 继续，已完成节点不重跑 |
 
 待执行 TODO：
@@ -243,6 +259,8 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 - [x] release / publish 保持同步 API 执行，不命令化（已确认）
 - [ ] 补心跳续租测试：断言 Worker 每 15 秒延长 Run lease 与 Command `claimed_until`
 - [x] thread_id 决策：接入 LangGraph SqliteSaver 双写，`thread_id=run_id`；自定义 checkpoint 保持权威
+- [x] Mission gate 节点级接管试点：新 Run 默认启用，旧 Run 保持自定义路径
+- [ ] 迁移 Quality / Source / Release gate 到 interrupt/resume
 - [ ] 补 Graph 层 `TokenPreflightError → waiting_for_human` 的原因码测试
 - [ ] 补 tokenizer 缺失/损坏时 fail-closed 的 Provider 调用计数测试
 - [ ] 评估 Provider 单次调用结果缓存（input_hash 的更细粒度复用）
@@ -324,7 +342,7 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 
 ## 课程生成约束
 
-- 现行 SQLite schema 版本为 15，可从 v7 起重复迁移。`intakes` 持久保存
+- 现行 SQLite schema 版本为 16，可从 v7 起重复迁移。`intakes` 持久保存
   `source_policy`、`expected_chapters`、`min_effective_chars`、`token_limit`，`runs` 保存
   `constraints_version`，`publications` 保存已发布课程。迁移前 Run 固定为版本 0，不追溯
   执行新约束；新 Run 固定为版本 1。
