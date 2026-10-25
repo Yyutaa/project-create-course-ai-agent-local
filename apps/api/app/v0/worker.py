@@ -365,15 +365,16 @@ class Worker:
             if run.status == "failed":
                 raise RuntimeError("Graph 节点业务失败；不自动重试")
             raise ValueError("START 不允许从业务失败或终态重试")
-        if (
-            self.runner.get(run_id).langgraph_flow_version == 1
-            and self._langgraph_has_pending_task(run_id)
-        ):
+        if run.langgraph_flow_version == 1:
+            # LangGraph owns the position: continue the pending node when
+            # possible, otherwise replay from START and let NodeExecution
+            # reuse/effect ledger skip committed work.
             try:
                 self.runner.execute(
                     run_id, state=None, execution=self.execution,
                     owner=self.owner, epoch=epoch,
-                    command_id=command.id, resume_graph=True,
+                    command_id=command.id,
+                    resume_graph=self._langgraph_has_pending_task(run_id),
                 )
             except StopRequested:
                 self._mark_stopped(run_id, epoch)
