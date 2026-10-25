@@ -3,6 +3,7 @@
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
 
 from app.v0.batching import assign_blueprint_ids, build_batch_plan, complete_batch
 from app.v0.context import ContextBudgetError, ContextPackBuilder
@@ -58,6 +59,27 @@ def route_after_intake(state: GraphState) -> str:
 
 def route_after_mission(state: GraphState) -> str:
     return _route_standard(state, "blueprint")
+
+
+def route_after_mission_flow(
+    state: GraphState, *, langgraph_flow_version: int,
+    mission_review_required: bool,
+) -> str:
+    if state.last_outcome != "succeeded":
+        return _route_standard(state, "blueprint")
+    if langgraph_flow_version == 1 and mission_review_required:
+        return "mission_gate"
+    return "blueprint"
+
+
+def route_after_mission_gate(state: GraphState) -> str:
+    if state.last_outcome != "succeeded":
+        return _route_standard(state, "blueprint")
+    if state.mission_decision == "approve":
+        return "blueprint"
+    if state.mission_decision == "revise":
+        return "mission"
+    return "route_error"
 
 
 def route_after_blueprint(state: GraphState) -> str:
@@ -348,7 +370,11 @@ class WorkflowNodes:
             sources,
         )
         reference = self.runner._source_refs(state.run_id, ("mission",))[0]
-        if self.runner.store and self.runner.store.mission_review_required(state.run_id):
+        if (
+            self.runner.store
+            and self.runner.store.mission_review_required(state.run_id)
+            and run.langgraph_flow_version == 0
+        ):
             self.runner._mark_waiting(
                 state.run_id, index, "Mission 待人工确认"
             )
@@ -361,6 +387,50 @@ class WorkflowNodes:
         return {
             "current_node": "mission",
             "artifact_refs": {**state.artifact_refs, "mission": reference},
+            "last_outcome": "succeeded",
+        }
+
+    def mission_gate(self, state: GraphState) -> dict:
+        return self._mission_gate(
+            state, self.runner.stage_index("mission"),
+        )
+
+    def _mission_gate(self, state: GraphState, index: int) -> dict:
+        review_required = bool(
+            self.runner.store
+            and self.runner.store.mission_review_required(state.run_id)
+        )
+        if not review_required:
+            self.runner._mark_stage_succeeded(
+                state.run_id, self.runner.stage_index("mission"),
+                "Mission 已生成",
+            )
+            return {
+                "current_node": "mission_gate",
+                "mission_decision": "approve",
+                "last_outcome": "succeeded",
+            }
+        reference = state.artifact_refs.get("mission")
+        if reference is None:
+            raise GraphRouteError("Mission gate 缺少 Mission 引用")
+        value = interrupt({
+            "type": "mission_review",
+            "run_id": state.run_id,
+            "mission_ref": reference.model_dump(mode="json"),
+        })
+        if not isinstance(value, dict):
+            raise GraphRouteError("Mission gate resume payload 无效")
+        action = value.get("action")
+        feedback = value.get("feedback")
+        if action not in ("approve", "revise"):
+            raise GraphRouteError("Mission gate resume action 无效")
+        if action == "revise" and (
+            not isinstance(feedback, str) or not feedback.strip()
+        ):
+            raise GraphRouteError("Mission gate revise 缺少反馈")
+        return {
+            "current_node": "mission_gate",
+            "mission_decision": action,
             "last_outcome": "succeeded",
         }
 
@@ -1486,8 +1556,12 @@ def build_graph(
             if decision.action == "reuse" and decision.reused_state is not None:
                 return decision.reused_state.model_dump(exclude={"run_id"})
             if decision.action == "blocked":
+                index = (
+                    1 if name == "mission_gate"
+                    else runner.stage_index(name)
+                )
                 runner._mark_waiting(
-                    state.run_id, runner.stage_index(name),
+                    state.run_id, index,
                     decision.reason or "node_blocked",
                 )
                 return {
@@ -1541,6 +1615,9 @@ def build_graph(
 
     builder.add_node("intake", instrument("intake", nodes.intake))
     builder.add_node("mission", instrument("mission", nodes.mission))
+    builder.add_node(
+        "mission_gate", instrument("mission_gate", nodes.mission_gate),
+    )
     builder.add_node("blueprint", instrument("blueprint", nodes.blueprint))
     builder.add_node("batch_plan", instrument("batch_plan", nodes.batch_plan))
     builder.add_node("generation", instrument("generation", nodes.generation))
@@ -1557,7 +1634,21 @@ def build_graph(
         else route_start(state),
     )
     builder.add_conditional_edges("intake", route_after_intake)
-    builder.add_conditional_edges("mission", route_after_mission)
+    def route_after_mission_node(state: GraphState) -> str:
+        run = runner.get(state.run_id)
+        return route_after_mission_flow(
+            state,
+            langgraph_flow_version=run.langgraph_flow_version,
+            mission_review_required=bool(
+                runner.store
+                and runner.store.mission_review_required(state.run_id)
+            ),
+        )
+
+    builder.add_conditional_edges("mission", route_after_mission_node)
+    builder.add_conditional_edges(
+        "mission_gate", route_after_mission_gate,
+    )
     builder.add_conditional_edges("blueprint", route_after_blueprint)
     builder.add_conditional_edges("batch_plan", route_after_batch_plan)
     builder.add_conditional_edges("generation", route_after_generation)

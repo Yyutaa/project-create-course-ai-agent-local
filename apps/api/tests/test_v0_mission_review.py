@@ -30,6 +30,18 @@ def disable_source_evidence(facts: FactStore, run_id: str) -> None:
         connection.execute("DELETE FROM snapshots WHERE run_id=?", (run_id,))
 
 
+def create_legacy_run(facts: FactStore, course, key: str, **kwargs):
+    """Create a Run pinned to the pre-LangGraph mission gate flow."""
+    run, created = facts.create_run(course, key, **kwargs)
+    run.langgraph_flow_version = 0
+    with facts.connect() as connection:
+        connection.execute(
+            "UPDATE runs SET langgraph_flow_version=0 WHERE id=?", (run.id,),
+        )
+        connection.execute("DELETE FROM snapshots WHERE run_id=?", (run.id,))
+    return run, created
+
+
 def test_v4_run_migrates_without_retroactive_mission_gate(tmp_path):
     path = tmp_path / "old.sqlite3"
     with sqlite3.connect(path) as connection:
@@ -39,14 +51,14 @@ def test_v4_run_migrates_without_retroactive_mission_gate(tmp_path):
     facts = FactStore(path)
     facts.migrate()
     facts.migrate()
-    assert facts.schema_version() == 15
+    assert facts.schema_version() == 16
     assert facts.mission_review_required("old-run") is False
 
 
 def test_new_run_requires_mission_review_and_accepts_idempotent_command(tmp_path):
     facts = FactStore(tmp_path / "facts.sqlite3")
     facts.migrate()
-    run, _ = facts.create_run(COURSE, "create-1")
+    run, _ = create_legacy_run(facts, COURSE, "create-1")
     assert facts.mission_review_required(run.id)
 
     commands = ExecutionStore(facts.path)
@@ -99,7 +111,7 @@ def waiting_mission(facts, commands, run_id):
 def test_mission_decision_is_version_bound_and_replay_safe(tmp_path):
     facts = FactStore(tmp_path / "facts.sqlite3")
     facts.migrate()
-    run, _ = facts.create_run(COURSE, "create-1")
+    run, _ = create_legacy_run(facts, COURSE, "create-1")
     commands = ExecutionStore(facts.path)
     owner, epoch, ref, checkpoint_id = waiting_mission(facts, commands, run.id)
     payload = {
@@ -127,7 +139,7 @@ def test_mission_decision_is_version_bound_and_replay_safe(tmp_path):
 def test_new_run_waits_for_mission_review_before_blueprint(tmp_path):
     facts = FactStore(tmp_path / "facts.sqlite3")
     facts.migrate()
-    run, _ = facts.create_run(COURSE, "create-1", enqueue_start=True)
+    run, _ = create_legacy_run(facts, COURSE, "create-1", enqueue_start=True)
     worker = Worker(facts.path, provider=FakeProvider())
     assert worker.run_once()
     current = facts.get_run(run.id)
@@ -141,7 +153,7 @@ def test_new_run_waits_for_mission_review_before_blueprint(tmp_path):
 def test_revision_context_and_source_reference_are_limited_to_prior_mission(tmp_path):
     facts = FactStore(tmp_path / "facts.sqlite3")
     facts.migrate()
-    run, _ = facts.create_run(COURSE, "create-1")
+    run, _ = create_legacy_run(facts, COURSE, "create-1")
     commands = ExecutionStore(facts.path)
     _, _, prior, _ = waiting_mission(facts, commands, run.id)
     pack = ContextPackBuilder(facts.get_artifact).for_mission_revision(
@@ -185,7 +197,7 @@ def review_payload(facts, commands, run_id, action, feedback=None):
 def test_worker_approval_continues_from_mission_to_blueprint(tmp_path):
     facts = FactStore(tmp_path / "facts.sqlite3")
     facts.migrate()
-    run, _ = facts.create_run(COURSE, "create-1", enqueue_start=True)
+    run, _ = create_legacy_run(facts, COURSE, "create-1", enqueue_start=True)
     disable_source_evidence(facts, run.id)
     commands = ExecutionStore(facts.path)
     worker = Worker(facts.path, provider=FakeProvider())
@@ -216,7 +228,7 @@ def test_worker_revision_keeps_v1_and_waits_again_for_v2(tmp_path):
 
     facts = FactStore(tmp_path / "facts.sqlite3")
     facts.migrate()
-    run, _ = facts.create_run(COURSE, "create-1", enqueue_start=True)
+    run, _ = create_legacy_run(facts, COURSE, "create-1", enqueue_start=True)
     commands = ExecutionStore(facts.path)
     worker = Worker(facts.path, provider=RevisingProvider())
     assert worker.run_once()
@@ -238,7 +250,7 @@ def test_worker_revision_keeps_v1_and_waits_again_for_v2(tmp_path):
 def test_resume_cannot_approve_mission_by_itself(tmp_path):
     facts = FactStore(tmp_path / "facts.sqlite3")
     facts.migrate()
-    run, _ = facts.create_run(COURSE, "create-1", enqueue_start=True)
+    run, _ = create_legacy_run(facts, COURSE, "create-1", enqueue_start=True)
     commands = ExecutionStore(facts.path)
     worker = Worker(facts.path, provider=FakeProvider())
     worker.run_once()
@@ -251,7 +263,7 @@ def test_resume_cannot_approve_mission_by_itself(tmp_path):
 def test_stale_checkpoint_rejects_mission_review_without_decision(tmp_path):
     facts = FactStore(tmp_path / "facts.sqlite3")
     facts.migrate()
-    run, _ = facts.create_run(COURSE, "create-1", enqueue_start=True)
+    run, _ = create_legacy_run(facts, COURSE, "create-1", enqueue_start=True)
     commands = ExecutionStore(facts.path)
     worker = Worker(facts.path, provider=FakeProvider())
     worker.run_once()
@@ -267,7 +279,7 @@ def test_stale_checkpoint_rejects_mission_review_without_decision(tmp_path):
 def test_stale_mission_hash_rejects_review_without_decision(tmp_path):
     facts = FactStore(tmp_path / "facts.sqlite3")
     facts.migrate()
-    run, _ = facts.create_run(COURSE, "create-1", enqueue_start=True)
+    run, _ = create_legacy_run(facts, COURSE, "create-1", enqueue_start=True)
     commands = ExecutionStore(facts.path)
     worker = Worker(facts.path, provider=FakeProvider())
     worker.run_once()
@@ -283,7 +295,7 @@ def test_stale_mission_hash_rejects_review_without_decision(tmp_path):
 def test_crash_after_review_decision_replays_without_second_decision(tmp_path):
     facts = FactStore(tmp_path / "facts.sqlite3")
     facts.migrate()
-    run, _ = facts.create_run(COURSE, "create-1", enqueue_start=True)
+    run, _ = create_legacy_run(facts, COURSE, "create-1", enqueue_start=True)
     disable_source_evidence(facts, run.id)
     commands = ExecutionStore(facts.path)
     first = Worker(facts.path, provider=FakeProvider(), owner="worker-a")
@@ -313,7 +325,7 @@ def test_crash_after_review_decision_replays_without_second_decision(tmp_path):
 def test_mission_review_is_indexed_as_redacted_human_evidence(tmp_path):
     facts = FactStore(tmp_path / "facts.sqlite3")
     facts.migrate()
-    run, _ = facts.create_run(COURSE, "create-1", enqueue_start=True)
+    run, _ = create_legacy_run(facts, COURSE, "create-1", enqueue_start=True)
     commands = ExecutionStore(facts.path)
     worker = Worker(facts.path, provider=FakeProvider())
     worker.run_once()
@@ -332,7 +344,7 @@ def test_mission_review_is_indexed_as_redacted_human_evidence(tmp_path):
 def test_stop_accepted_before_approval_blocks_blueprint(tmp_path):
     facts = FactStore(tmp_path / "facts.sqlite3")
     facts.migrate()
-    run, _ = facts.create_run(COURSE, "create-1", enqueue_start=True)
+    run, _ = create_legacy_run(facts, COURSE, "create-1", enqueue_start=True)
     commands = ExecutionStore(facts.path)
     worker = Worker(facts.path, provider=FakeProvider())
     worker.run_once()
@@ -349,7 +361,7 @@ def test_stop_accepted_before_approval_blocks_blueprint(tmp_path):
 def test_crash_after_mission_artifact_reuses_version_on_takeover(tmp_path):
     facts = FactStore(tmp_path / "facts.sqlite3")
     facts.migrate()
-    run, _ = facts.create_run(COURSE, "create-1", enqueue_start=True)
+    run, _ = create_legacy_run(facts, COURSE, "create-1", enqueue_start=True)
     first = Worker(facts.path, provider=FakeProvider(), owner="worker-a")
     first.runner._mark_waiting = lambda *args: (_ for _ in ()).throw(
         SystemExit("crash after mission artifact")

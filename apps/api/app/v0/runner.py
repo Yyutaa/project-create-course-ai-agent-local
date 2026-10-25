@@ -13,10 +13,13 @@ from app.v0 import publishing
 from app.v0.agents import AGENT_DEFINITIONS, AgentExecutor
 from app.v0.artifact_tools import ArtifactTools
 from app.v0.execution import StopRequested
+from langgraph.types import Command
+
 from app.v0.langgraph_checkpoint import (
     checkpoint_path,
     graph_config,
     open_checkpointer,
+    thread_config,
 )
 from app.v0.node_inputs import build_node_input_hash
 from app.v0.provider import Provider
@@ -306,9 +309,76 @@ class V0Runner:
             )
         return refs
 
+    def _invoke_compiled(
+        self, graph, run_id: str, state: GraphState | None,
+        resume_payload: dict | None,
+    ):
+        if resume_payload is not None:
+            snapshot = graph.get_state(thread_config(run_id))
+            if not snapshot.interrupts:
+                return None
+            expected = self._pending_interrupt_id(run_id)
+            if expected and snapshot.interrupts[0].id != expected:
+                raise ValueError("LangGraph interrupt 已变化")
+            result = graph.invoke(
+                Command(resume=resume_payload), config=graph_config(run_id),
+            )
+        else:
+            result = graph.invoke(
+                state or GraphState(run_id=run_id), config=graph_config(run_id),
+            )
+        self._handle_interrupt_result(result)
+        return result
+
+    def _pending_interrupt_id(self, run_id: str) -> str | None:
+        if self._execution is None:
+            return None
+        checkpoint = self._execution.last_checkpoint(run_id)
+        if checkpoint is None:
+            return None
+        try:
+            state = GraphState.model_validate_json(checkpoint["state_json"])
+        except Exception:
+            return None
+        return state.pending_interrupt_id
+
+    def _handle_interrupt_result(self, result) -> None:
+        if self._execution is None or self._execution_attempt is None:
+            return
+        if not isinstance(result, dict):
+            return
+        interrupts = result.get("__interrupt__")
+        if not interrupts:
+            return
+        state = self._execution_state
+        if state is None:
+            return
+        node = state.current_node
+        reason = (
+            "mission_review_required"
+            if node == "mission_gate" else f"{node}_interrupt"
+        )
+        index = 1 if node == "mission_gate" else self.stage_index(node)
+        interrupt_id = getattr(interrupts[0], "id", None)
+        self._mark_waiting(state.run_id, index, reason)
+        waiting_state = state.model_copy(update={
+            "current_node": node,
+            "last_outcome": "waiting_for_human",
+            "exit_reason": reason,
+            "pending_interrupt_id": interrupt_id,
+        })
+        self._execution.finish_node_waiting(
+            self._execution_attempt, waiting_state,
+            self._execution_owner, self._execution_epoch, reason,
+        )
+        self._execution_attempt = None
+        self._execution_state = None
+        self._bind_node_execution(None)
+
     def _invoke_graph(
-        self, run_id: str, state: GraphState, *,
+        self, run_id: str, state: GraphState | None, *,
         release_decision=None, request_key=None,
+        resume_payload: dict | None = None,
     ):
         from app.v0.graph import build_graph
 
@@ -318,17 +388,26 @@ class V0Runner:
                 request_key=request_key,
                 checkpointer=self.langgraph_checkpointer,
             )
-            return graph.invoke(state, config=graph_config(run_id))
+            return self._invoke_compiled(
+                graph, run_id, state, resume_payload,
+            )
         if self.langgraph_checkpoint_path is not None:
             with open_checkpointer(self.langgraph_checkpoint_path) as saver:
                 graph = build_graph(
                     self, release_decision=release_decision,
                     request_key=request_key, checkpointer=saver,
                 )
-                return graph.invoke(state, config=graph_config(run_id))
+                return self._invoke_compiled(
+                    graph, run_id, state, resume_payload,
+                )
+        if resume_payload is not None:
+            raise ValueError("LangGraph resume 需要 checkpointer")
         return build_graph(
             self, release_decision=release_decision, request_key=request_key,
-        ).invoke(state, config={"recursion_limit": 100})
+        ).invoke(
+            state or GraphState(run_id=run_id),
+            config={"recursion_limit": 100},
+        )
 
     def execute(
         self, run_id: str, *, state: GraphState | None = None,
@@ -336,17 +415,21 @@ class V0Runner:
         recovery_effect: dict | None = None,
         command_id: str | None = None,
         retry_override_node: str | None = None,
+        resume_payload: dict | None = None,
     ) -> None:
         self._execution = execution
         self._execution_owner = owner
         self._execution_epoch = epoch
         self._execution_command_id = command_id
-        self._execution_resume = state is not None
+        self._execution_resume = state is not None or resume_payload is not None
         self._recovery_effect = recovery_effect
         self._retry_override_node = retry_override_node
         try:
             self._invoke_graph(
-                run_id, state or GraphState(run_id=run_id),
+                run_id,
+                state if resume_payload is not None
+                else state or GraphState(run_id=run_id),
+                resume_payload=resume_payload,
             )
         finally:
             self._execution = None
@@ -410,7 +493,9 @@ class V0Runner:
             )
             input_hash = build_node_input_hash(
                 node=node, run=run, state=checkpoint,
-                mission_review=mission_review,
+                mission_review=(
+                    None if node == "mission_gate" else mission_review
+                ),
                 source_summary=source_summary,
                 human_input=human_input,
                 provider=self.provider,

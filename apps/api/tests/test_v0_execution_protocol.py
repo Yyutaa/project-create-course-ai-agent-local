@@ -27,10 +27,11 @@ def stores(tmp_path):
     run.constraints_version = 0
     run.source_evidence_version = 0
     run.context_contract_version = 0
+    run.langgraph_flow_version = 0
     with facts.connect() as connection:
         connection.execute(
             "UPDATE runs SET mission_review_required=0, constraints_version=0, "
-            "source_evidence_version=0, context_contract_version=0 WHERE id=?",
+            "source_evidence_version=0, context_contract_version=0, langgraph_flow_version=0 WHERE id=?",
             (run.id,),
         )
         connection.execute(
@@ -1486,3 +1487,62 @@ def test_new_run_reuses_committed_mission_without_provider_call(tmp_path):
             (run.id,),
         ).fetchone()[0]
     assert reused == 1
+
+
+def test_waiting_node_execution_can_be_resumed_without_new_attempt(stores):
+    facts, commands, run_id = stores
+    epoch = commands.acquire(run_id, "worker-a", ttl_seconds=1)
+    first = _claim(commands, run_id, "worker-a", epoch)
+    waiting_state = GraphState(
+        run_id=run_id, current_node="mission_gate",
+        last_outcome="waiting_for_human",
+        pending_interrupt_id="interrupt-1",
+    )
+    commands.finish_node_waiting(
+        first.execution_id, waiting_state, "worker-a", epoch,
+        "mission_review_required",
+    )
+    with facts.connect() as connection:
+        status = connection.execute(
+            "SELECT status FROM node_executions WHERE id=?", (first.execution_id,),
+        ).fetchone()[0]
+    assert status == "WAITING"
+
+    commands.expire_for_test(run_id)
+    epoch_b = commands.acquire(run_id, "worker-b", ttl_seconds=60)
+    resumed = _claim(commands, run_id, "worker-b", epoch_b)
+    assert resumed.outcome == "claimed"
+    assert resumed.execution_id == first.execution_id
+    assert resumed.attempt == first.attempt
+    with facts.connect() as connection:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM node_executions WHERE run_id=? AND node='mission'",
+            (run_id,),
+        ).fetchone()[0]
+        status = connection.execute(
+            "SELECT status, lease_epoch FROM node_executions WHERE id=?",
+            (first.execution_id,),
+        ).fetchone()
+    assert count == 1
+    assert status["status"] == "STARTED"
+    assert status["lease_epoch"] == epoch_b
+
+
+def test_waiting_node_execution_rejects_changed_input_hash(stores):
+    _, commands, run_id = stores
+    epoch = commands.acquire(run_id, "worker-a")
+    first = _claim(commands, run_id, "worker-a", epoch)
+    commands.finish_node_waiting(
+        first.execution_id,
+        GraphState(
+            run_id=run_id, current_node="mission_gate",
+            last_outcome="waiting_for_human",
+            pending_interrupt_id="interrupt-1",
+        ),
+        "worker-a", epoch, "mission_review_required",
+    )
+    changed = _claim(
+        commands, run_id, "worker-a", epoch, hash_="different",
+    )
+    assert changed.outcome == "blocked"
+    assert changed.reason == "interrupt_input_changed"

@@ -263,6 +263,11 @@ def test_mission_success_after_timeout_still_requires_human_approval(tmp_path):
     run, _ = facts.create_run(CourseInput(
         topic="Vue", audience="初学者", goal="理解 state", language="zh",
     ), "mission-timeout-success", enqueue_start=True)
+    with facts.connect() as connection:
+        connection.execute(
+            "UPDATE runs SET langgraph_flow_version=0 WHERE id=?", (run.id,),
+        )
+        connection.execute("DELETE FROM snapshots WHERE run_id=?", (run.id,))
 
     class OnceTimeout(FakeProvider):
         mission_calls = 0

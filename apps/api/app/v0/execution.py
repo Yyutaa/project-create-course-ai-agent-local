@@ -820,7 +820,8 @@ class ExecutionStore:
                 (run_id, node),
             ).fetchone()
             recovering_started = bool(
-                latest_attempt and latest_attempt["status"] == "STARTED"
+                latest_attempt
+                and latest_attempt["status"] in ("STARTED", "WAITING")
             )
             if (
                 token_limit is not None
@@ -828,6 +829,36 @@ class ExecutionStore:
                 and not recovering_started
             ):
                 raise TokenLimitReached(tokens_used, token_limit, node)
+            if reuse_enabled and input_hash is not None:
+                waiting = connection.execute(
+                    "SELECT * FROM node_executions WHERE run_id=? AND node=? "
+                    "AND status='WAITING' ORDER BY rowid DESC LIMIT 1",
+                    (run_id, node),
+                ).fetchone()
+                if waiting is not None:
+                    if waiting["input_hash"] != input_hash:
+                        return NodeClaim(
+                            outcome="blocked",
+                            reason="interrupt_input_changed",
+                        )
+                    checkpoint_id = self._checkpoint(
+                        connection, run_id, waiting["id"], "before_node", state,
+                    )
+                    connection.execute(
+                        "UPDATE node_executions SET status='STARTED', "
+                        "lease_epoch=?, before_checkpoint_id=?, "
+                        "after_checkpoint_id=NULL, error=NULL, "
+                        "failure_class=NULL, updated_at=? "
+                        "WHERE id=? AND status='WAITING'",
+                        (epoch, checkpoint_id, now, waiting["id"]),
+                    )
+                    return NodeClaim(
+                        outcome="claimed",
+                        execution_id=waiting["id"],
+                        attempt=waiting["attempt"],
+                        checkpoint_id=checkpoint_id,
+                        lease_epoch=epoch,
+                    )
             lookup = reuse_enabled and input_hash is not None
             if lookup:
                 live = connection.execute(
@@ -984,6 +1015,32 @@ class ExecutionStore:
                     "FAILED" if failed else "COMMITTED", checkpoint_id,
                     error[:200] if error else None, epoch,
                     (failure_class or "unknown") if failed else None,
+                    _utc().isoformat(), execution_id,
+                ),
+            )
+
+    def finish_node_waiting(
+        self, execution_id: str, state: GraphState, owner: str, epoch: int,
+        reason: str,
+    ) -> None:
+        with self.facts.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT run_id, status FROM node_executions WHERE id=?",
+                (execution_id,),
+            ).fetchone()
+            if row is None or row["status"] != "STARTED":
+                raise ValueError("NodeExecution 状态不允许等待")
+            self._require_lease(connection, row["run_id"], owner, epoch)
+            checkpoint_id = self._checkpoint(
+                connection, row["run_id"], execution_id, "after_node", state,
+            )
+            connection.execute(
+                "UPDATE node_executions SET status='WAITING', "
+                "after_checkpoint_id=?, error=?, lease_epoch=?, "
+                "failure_class=NULL, updated_at=? WHERE id=?",
+                (
+                    checkpoint_id, reason[:200], epoch,
                     _utc().isoformat(), execution_id,
                 ),
             )

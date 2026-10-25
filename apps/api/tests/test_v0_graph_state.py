@@ -28,6 +28,8 @@ def test_graph_state_has_only_frozen_control_fields_and_artifact_references():
         "quality_cursor",
         "active_finding_id",
         "approval_status",
+        "mission_decision",
+        "pending_interrupt_id",
         "loop_counts",
         "last_outcome",
         "exit_reason",

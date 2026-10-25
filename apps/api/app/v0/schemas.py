@@ -38,7 +38,9 @@ ContextPromise = Annotated[
 BatchIndex = Annotated[int, Field(ge=0)]
 ArtifactKind = Literal["mission", "blueprint", "batch_plan", "lesson", "quality"]
 ProducerRole = AgentRole | Literal["system"]
-GraphNode = StageName | Literal["repair", "verification", "route_error"]
+GraphNode = StageName | Literal[
+    "repair", "verification", "mission_gate", "route_error",
+]
 GraphOutcome = Literal[
     "pending", "succeeded", "failed", "waiting_for_human", "stopped", "unknown"
 ]
@@ -74,6 +76,8 @@ class GraphState(BaseModel):
     quality_cursor: int = Field(default=0, ge=0)
     active_finding_id: str | None = None
     approval_status: ApprovalStatus = "not_requested"
+    mission_decision: Literal["approve", "revise"] | None = None
+    pending_interrupt_id: str | None = None
     loop_counts: LoopCounts = Field(default_factory=LoopCounts)
     last_outcome: GraphOutcome = "pending"
     exit_reason: str | None = None
@@ -365,6 +369,7 @@ class V0Run(BaseModel):
     source_evidence_version: int = Field(default=0, ge=0, le=1)
     planning_loop_version: int = Field(default=0, ge=0, le=1)
     context_contract_version: int = Field(default=0, ge=0, le=1)
+    langgraph_flow_version: int = Field(default=0, ge=0, le=1)
     revision: int = 0
     artifacts: list[ArtifactSummary] = Field(default_factory=list)
     status: RunStatus = "running"

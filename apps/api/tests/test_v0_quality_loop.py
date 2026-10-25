@@ -33,10 +33,11 @@ def execute_legacy(runner: V0Runner, run_id: str) -> None:
     run.constraints_version = 0
     run.source_evidence_version = 0
     run.context_contract_version = 0
+    run.langgraph_flow_version = 0
     with runner.store.connect() as connection:
         connection.execute(
             "UPDATE runs SET mission_review_required=0, constraints_version=0, "
-            "source_evidence_version=0, context_contract_version=0 WHERE id=?",
+            "source_evidence_version=0, context_contract_version=0, langgraph_flow_version=0 WHERE id=?",
             (run_id,),
         )
         connection.execute(

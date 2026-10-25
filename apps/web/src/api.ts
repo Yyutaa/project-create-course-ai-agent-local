@@ -55,6 +55,7 @@ export type V0Run = {
   source_evidence_version: number;
   planning_loop_version: number;
   context_contract_version: number;
+  langgraph_flow_version: number;
   revision: number;
   artifacts: ArtifactSummary[];
   course_input: CourseInput;
