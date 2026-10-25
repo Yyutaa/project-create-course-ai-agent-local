@@ -74,6 +74,15 @@ class Worker:
             update={"current_node": target, "last_outcome": "pending", "exit_reason": None}
         )
 
+    def _recovery_effect(self, run_id, checkpoint, state):
+        if checkpoint is not None and checkpoint["position"] == "after_artifact":
+            effect = self.execution.latest_effect(run_id, state.current_node)
+            if effect is not None:
+                return effect
+        if checkpoint is not None and checkpoint["event_id"]:
+            return self.execution.event(run_id, checkpoint["event_id"])
+        return None
+
     def _mark_stopped(self, run_id: str, epoch: int) -> None:
         run = self.runner.get(run_id)
         if run.status == "stopped":
@@ -191,9 +200,8 @@ class Worker:
             if state is None:
                 return
             checkpoint = self.execution.last_checkpoint(run_id)
-            recovery_effect = (
-                self.execution.event(run_id, checkpoint["event_id"])
-                if checkpoint and checkpoint["event_id"] else None
+            recovery_effect = self._recovery_effect(
+                run_id, checkpoint, state,
             )
             try:
                 self.runner.execute(
@@ -253,9 +261,8 @@ class Worker:
             if state is None:
                 return
             checkpoint = self.execution.last_checkpoint(run_id)
-            recovery_effect = (
-                self.execution.event(run_id, checkpoint["event_id"])
-                if checkpoint and checkpoint["event_id"] else None
+            recovery_effect = self._recovery_effect(
+                run_id, checkpoint, state,
             )
             try:
                 self.runner.execute(
@@ -313,9 +320,8 @@ class Worker:
                 if command.payload.get("action") == "retry" else None
             )
             checkpoint = self.execution.last_checkpoint(run_id)
-            recovery_effect = (
-                self.execution.event(run_id, checkpoint["event_id"])
-                if checkpoint and checkpoint["event_id"] else None
+            recovery_effect = self._recovery_effect(
+                run_id, checkpoint, state,
             )
             try:
                 self.runner.execute(
@@ -348,10 +354,7 @@ class Worker:
         if state is None:
             return
         checkpoint = self.execution.last_checkpoint(run_id)
-        recovery_effect = (
-            self.execution.event(run_id, checkpoint["event_id"])
-            if checkpoint and checkpoint["event_id"] else None
-        )
+        recovery_effect = self._recovery_effect(run_id, checkpoint, state)
         try:
             self.runner.execute(
                 run_id, state=state if self.execution.last_checkpoint(run_id) else None,

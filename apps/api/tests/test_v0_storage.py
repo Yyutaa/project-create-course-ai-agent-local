@@ -16,7 +16,7 @@ def test_migration_is_repeatable_and_preserves_rows(tmp_path):
             ("c1", "第一门课", "c1", "2026-09-22T00:00:00Z"),
         )
     store.migrate()
-    assert store.schema_version() == 17
+    assert store.schema_version() == 18
     with store.connect() as connection:
         assert (
             connection.execute("SELECT title FROM courses WHERE id='c1'").fetchone()[0]
@@ -35,7 +35,7 @@ def test_v14_migration_preserves_existing_runs_and_versions_new_runs(tmp_path):
     store.migrate()
     store.migrate()
 
-    assert store.schema_version() == 17
+    assert store.schema_version() == 18
     with store.connect() as connection:
         assert connection.execute(
             "SELECT context_contract_version FROM runs WHERE id='old-run'"
@@ -110,7 +110,7 @@ def test_v7_migration_preserves_legacy_run_without_enabling_constraints(tmp_path
     store.migrate()
     store.migrate()
 
-    assert store.schema_version() == 17
+    assert store.schema_version() == 18
     with store.connect() as connection:
         run = connection.execute(
             "SELECT constraints_version FROM runs WHERE id='legacy-run'"
@@ -209,7 +209,7 @@ def test_migration_upgrades_v1_artifacts_without_inventing_provenance(tmp_path):
     store = storage.FactStore(path)
     store.migrate()
 
-    assert store.schema_version() == 17
+    assert store.schema_version() == 18
     with store.connect() as connection:
         columns = {
             row[1] for row in connection.execute("PRAGMA table_info(artifacts)").fetchall()
@@ -296,7 +296,7 @@ def test_v2_database_upgrades_to_execution_protocol_without_recreating_runs(tmp_
     store.migrate()
 
     with store.connect() as connection:
-        assert store.schema_version() == 17
+        assert store.schema_version() == 18
         assert connection.execute("SELECT id FROM runs").fetchone()[0] == "existing-run"
         assert connection.execute(
             "SELECT mission_review_required FROM runs WHERE id='existing-run'"
@@ -326,7 +326,7 @@ def test_v15_migration_adds_node_input_columns_and_preserves_rows(tmp_path):
     store.migrate()
     store.migrate()
 
-    assert store.schema_version() == 17
+    assert store.schema_version() == 18
     with store.connect() as connection:
         columns = {
             row["name"]
@@ -356,7 +356,7 @@ def test_v16_migration_adds_langgraph_flow_version(tmp_path):
     store.migrate()
     store.migrate()
 
-    assert store.schema_version() == 17
+    assert store.schema_version() == 18
     with store.connect() as connection:
         row = connection.execute(
             "SELECT langgraph_flow_version FROM runs WHERE id='old-run'"
@@ -377,6 +377,25 @@ def test_new_run_enables_langgraph_flow_version(tmp_path):
     with store.connect() as connection:
         connection.execute("DELETE FROM snapshots WHERE run_id=?", (run.id,))
     assert store.get_run(run.id).langgraph_flow_version == 1
+
+
+def test_v18_migration_creates_node_effects(tmp_path):
+    path = tmp_path / "facts.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE runs (id TEXT PRIMARY KEY)")
+        connection.execute("INSERT INTO runs(id) VALUES ('run-1')")
+        connection.execute("PRAGMA user_version=17")
+
+    store = storage.FactStore(path)
+    store.migrate()
+    store.migrate()
+
+    assert store.schema_version() == 18
+    with store.connect() as connection:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='node_effects'"
+        ).fetchone()
+    assert table is not None
 
 
 def test_v17_migration_adds_pending_interrupt_id(tmp_path):
@@ -400,7 +419,7 @@ def test_v17_migration_adds_pending_interrupt_id(tmp_path):
     store.migrate()
     store.migrate()
 
-    assert store.schema_version() == 17
+    assert store.schema_version() == 18
     with store.connect() as connection:
         row = connection.execute(
             "SELECT pending_interrupt_id FROM node_executions WHERE id='old'"

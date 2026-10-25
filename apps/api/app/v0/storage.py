@@ -80,25 +80,32 @@ class FactStore:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version >= 17:
+            if version >= 18:
+                return
+            if version == 17:
+                self._migrate_v18(connection)
                 return
             if version == 16:
                 self._migrate_v17(connection)
+                self._migrate_v18(connection)
                 return
             if version == 15:
                 self._migrate_v16(connection)
                 self._migrate_v17(connection)
+                self._migrate_v18(connection)
                 return
             if version == 14:
                 self._migrate_v15(connection)
                 self._migrate_v16(connection)
                 self._migrate_v17(connection)
+                self._migrate_v18(connection)
                 return
             if version == 13:
                 self._migrate_v14(connection)
                 self._migrate_v15(connection)
                 self._migrate_v16(connection)
                 self._migrate_v17(connection)
+                self._migrate_v18(connection)
                 return
             if version == 12:
                 self._migrate_v13(connection)
@@ -106,6 +113,7 @@ class FactStore:
                 self._migrate_v15(connection)
                 self._migrate_v16(connection)
                 self._migrate_v17(connection)
+                self._migrate_v18(connection)
                 return
             if version == 11:
                 self._migrate_v12(connection)
@@ -114,6 +122,7 @@ class FactStore:
                 self._migrate_v15(connection)
                 self._migrate_v16(connection)
                 self._migrate_v17(connection)
+                self._migrate_v18(connection)
                 return
             if version == 10:
                 self._migrate_v11(connection)
@@ -123,6 +132,7 @@ class FactStore:
                 self._migrate_v15(connection)
                 self._migrate_v16(connection)
                 self._migrate_v17(connection)
+                self._migrate_v18(connection)
                 return
             if version == 9:
                 self._migrate_v10(connection)
@@ -133,6 +143,7 @@ class FactStore:
                 self._migrate_v15(connection)
                 self._migrate_v16(connection)
                 self._migrate_v17(connection)
+                self._migrate_v18(connection)
                 return
             if version == 8:
                 self._migrate_v9(connection)
@@ -144,6 +155,7 @@ class FactStore:
                 self._migrate_v15(connection)
                 self._migrate_v16(connection)
                 self._migrate_v17(connection)
+                self._migrate_v18(connection)
                 return
             if version == 7:
                 self._migrate_v8(connection)
@@ -156,6 +168,7 @@ class FactStore:
                 self._migrate_v15(connection)
                 self._migrate_v16(connection)
                 self._migrate_v17(connection)
+                self._migrate_v18(connection)
                 return
             if version == 6:
                 self._migrate_v7(connection)
@@ -169,6 +182,7 @@ class FactStore:
                 self._migrate_v15(connection)
                 self._migrate_v16(connection)
                 self._migrate_v17(connection)
+                self._migrate_v18(connection)
                 return
             if version == 5:
                 self._migrate_v6(connection)
@@ -183,6 +197,7 @@ class FactStore:
                 self._migrate_v15(connection)
                 self._migrate_v16(connection)
                 self._migrate_v17(connection)
+                self._migrate_v18(connection)
                 return
             if version == 4:
                 self._migrate_v5(connection)
@@ -198,6 +213,7 @@ class FactStore:
                 self._migrate_v15(connection)
                 self._migrate_v16(connection)
                 self._migrate_v17(connection)
+                self._migrate_v18(connection)
                 return
             if version == 3:
                 self._migrate_v4(connection)
@@ -214,6 +230,7 @@ class FactStore:
                 self._migrate_v15(connection)
                 self._migrate_v16(connection)
                 self._migrate_v17(connection)
+                self._migrate_v18(connection)
                 return
             if version == 0:
                 connection.execute(
@@ -316,6 +333,7 @@ class FactStore:
             self._migrate_v15(connection)
             self._migrate_v16(connection)
             self._migrate_v17(connection)
+            self._migrate_v18(connection)
 
     @staticmethod
     def _migrate_v4(connection: sqlite3.Connection) -> None:
@@ -642,6 +660,23 @@ class FactStore:
                     "ALTER TABLE node_executions ADD COLUMN pending_interrupt_id TEXT"
                 )
         connection.execute("PRAGMA user_version=17")
+
+    @staticmethod
+    def _migrate_v18(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS node_effects ("
+            "id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), "
+            "node TEXT NOT NULL, input_hash TEXT NOT NULL, "
+            "effect_key TEXT NOT NULL, event_type TEXT NOT NULL, "
+            "artifact_id TEXT NOT NULL, artifact_version INTEGER NOT NULL, "
+            "content_hash TEXT NOT NULL, created_at TEXT NOT NULL, "
+            "UNIQUE(run_id, node, input_hash, effect_key))"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS node_effects_by_run "
+            "ON node_effects(run_id, node, input_hash)"
+        )
+        connection.execute("PRAGMA user_version=18")
 
     def mission_review_required(self, run_id: str) -> bool:
         with self.connect() as connection:
@@ -990,6 +1025,9 @@ class FactStore:
         lease_epoch: int | None = None,
         node_execution_id: str | None = None,
         checkpoint_state: GraphState | None = None,
+        effect_key: str | None = None,
+        effect_node: str | None = None,
+        effect_input_hash: str | None = None,
         clear_stop: bool = False,
     ) -> V0Run:
         relative_path = None
@@ -1124,6 +1162,22 @@ class FactStore:
                     "WHERE run_id=?",
                     (run.revision, run.model_dump_json(), now, run.id),
                 )
+                if (
+                    artifact is not None and effect_key
+                    and effect_node and effect_input_hash
+                    and artifact_id and version
+                ):
+                    connection.execute(
+                        "INSERT OR IGNORE INTO node_effects("
+                        "id, run_id, node, input_hash, effect_key, event_type, "
+                        "artifact_id, artifact_version, content_hash, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            uuid4().hex, run.id, effect_node,
+                            effect_input_hash, effect_key, event_type,
+                            artifact_id, version, content_hash, now,
+                        ),
+                    )
                 if node_execution_id and checkpoint_state:
                     refs = dict(checkpoint_state.artifact_refs)
                     if artifact is not None:

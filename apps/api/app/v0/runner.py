@@ -95,6 +95,7 @@ class V0Runner:
         self._recovery_effect = None
         self._retry_override_node: str | None = None
         self._failure_class: str | None = None
+        self._execution_input_hash: str | None = None
         if store is not None:
             store.migrate()
         self.artifact_tools = ArtifactTools(AGENT_DEFINITIONS, self._load_artifact)
@@ -147,6 +148,41 @@ class V0Runner:
         accepted_ref: ArtifactRef | None = None,
     ) -> None:
         references = list(source_refs or [])
+        effect_kind = artifact_kind or (
+            "lesson" if stage == "generation" else stage
+        )
+        effect_node = (
+            self._execution_state.current_node
+            if self._execution_state is not None else None
+        )
+        effect_key = None
+        effect_input_hash = self._execution_input_hash
+        if (
+            artifact is not None and self._execution is not None
+            and self._execution_attempt and effect_node and effect_input_hash
+        ):
+            lesson_id = getattr(artifact, "lesson_id", None)
+            effect_key = f"{event_type}:{effect_kind}:{lesson_id or ''}"
+            existing = self._execution.find_effect(
+                run.id, effect_node, effect_input_hash, effect_key,
+            )
+            if existing is not None:
+                key = "candidate" if event_type == "candidate.created" else (
+                    f"lesson:{lesson_id}"
+                    if effect_kind == "lesson" and lesson_id else effect_kind
+                )
+                refs = dict(self._execution_state.artifact_refs)
+                refs[key] = ArtifactRef(
+                    run_id=run.id,
+                    artifact_id=existing["artifact_id"],
+                    version=existing["artifact_version"],
+                    kind=effect_kind,
+                    content_hash=existing["content_hash"],
+                )
+                self._execution_state = self._execution_state.model_copy(
+                    update={"artifact_refs": refs}
+                )
+                return
         if self.store is not None:
             run = self.store.record(
                 run,
@@ -163,6 +199,9 @@ class V0Runner:
                 lease_epoch=self._execution_epoch,
                 node_execution_id=self._execution_attempt,
                 checkpoint_state=self._execution_state,
+                effect_key=effect_key,
+                effect_node=effect_node,
+                effect_input_hash=effect_input_hash,
             )
             if self._execution_state is not None and artifact is not None:
                 kind = artifact_kind or ("lesson" if stage == "generation" else stage)
@@ -443,9 +482,11 @@ class V0Runner:
             self._recovery_effect = None
             self._retry_override_node = None
             self._failure_class = None
+            self._execution_input_hash = None
 
     def _node_started(self, node: str, state: GraphState) -> NodeStartDecision:
         self._failure_class = None
+        self._execution_input_hash = None
         if self._execution is None:
             return NodeStartDecision(action="execute")
         checkpoint = state.model_copy(
@@ -533,6 +574,7 @@ class V0Runner:
                 action="blocked", reason=claim.reason or "node_blocked",
             )
         self._execution_attempt = claim.execution_id
+        self._execution_input_hash = input_hash
         self._bind_node_execution(self._execution_attempt)
         self._execution_state = checkpoint
         return NodeStartDecision(action="execute")
@@ -563,6 +605,7 @@ class V0Runner:
         self._execution_attempt = None
         self._bind_node_execution(None)
         self._execution_state = None
+        self._execution_input_hash = None
         self._failure_class = None
         self._recovery_effect = None
 

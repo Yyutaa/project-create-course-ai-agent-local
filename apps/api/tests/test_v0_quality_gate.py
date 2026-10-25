@@ -1,3 +1,5 @@
+import pytest
+
 from app.v0.provider import AgentResponse, FakeProvider
 from app.v0.schemas import CourseInput
 from app.v0.storage import FactStore
@@ -80,6 +82,14 @@ def test_quality_gate_interrupts_and_accepts_risk(tmp_path):
         ).fetchone()
     assert execution["status"] == "WAITING"
     assert execution["pending_interrupt_id"]
+
+    with facts.connect() as connection:
+        effects = connection.execute(
+            "SELECT node FROM node_effects WHERE run_id=?", (run.id,),
+        ).fetchall()
+    assert {"mission", "blueprint", "batch_plan", "generation", "quality"} <= {
+        row["node"] for row in effects
+    }
 
     review = commands.read_model(run.id).quality_review
     assert review is not None and review.status == "pending"
@@ -180,3 +190,38 @@ def test_verification_gate_accepts_candidate(tmp_path):
     assert resumed.stages[5].status == "succeeded"
     assert resumed.lesson.markdown.startswith("# Python 变量入门")
     assert "变量可以保存并更新一个值" in resumed.lesson.markdown
+
+
+def test_quality_artifact_crash_recovery_uses_effect_ledger(tmp_path):
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run = make_run(facts)
+    first = Worker(facts.path, provider=FakeProvider(), owner="worker-a")
+    original = first.runner._node_finished
+
+    def crash_after_quality(state, result):
+        if result.get("current_node") == "quality" and (
+            result.get("last_outcome") == "succeeded"
+        ):
+            raise SystemExit("simulated process death")
+        original(state, result)
+
+    first.runner._node_finished = crash_after_quality
+    command = first.execution.claim(first.owner)
+    epoch = first.execution.acquire(run.id, first.owner)
+    with pytest.raises(SystemExit):
+        first._apply(command, epoch)
+
+    with facts.connect() as connection:
+        effects = connection.execute(
+            "SELECT artifact_id FROM node_effects WHERE run_id=? AND node='quality'",
+            (run.id,),
+        ).fetchall()
+    assert effects
+
+    first.execution.expire_for_test(run.id)
+    assert Worker(facts.path, provider=FakeProvider(), owner="worker-b").run_once()
+    quality = [
+        item for item in facts.list_artifacts(run.id) if item.kind == "quality"
+    ]
+    assert len(quality) == 1

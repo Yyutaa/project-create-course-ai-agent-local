@@ -1067,6 +1067,34 @@ class ExecutionStore:
                 ),
             )
 
+    def find_effect(
+        self, run_id: str, node: str, input_hash: str, effect_key: str,
+    ) -> dict | None:
+        with self.facts.connect() as connection:
+            row = connection.execute(
+                "SELECT id, event_type, artifact_id, artifact_version, content_hash "
+                "FROM node_effects WHERE run_id=? AND node=? AND input_hash=? "
+                "AND effect_key=?",
+                (run_id, node, input_hash, effect_key),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def latest_effect(self, run_id: str, node: str) -> dict | None:
+        with self.facts.connect() as connection:
+            row = connection.execute(
+                "SELECT id, event_type, artifact_id, artifact_version "
+                "FROM node_effects WHERE run_id=? AND node=? "
+                "ORDER BY rowid DESC LIMIT 1",
+                (run_id, node),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"], "type": row["event_type"], "stage": node,
+            "artifact_id": row["artifact_id"],
+            "artifact_version": row["artifact_version"],
+        }
+
     def waiting_interrupt_id(self, run_id: str) -> str | None:
         with self.facts.connect() as connection:
             row = connection.execute(
