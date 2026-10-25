@@ -217,6 +217,17 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 - 启动端口固定为 API 8002、Vite 5176；Worker 无 HTTP 端口。冻结契约与限制见
   本节约定。
 
+### LangGraph checkpoint 双写
+
+- Worker 每次 invoke Graph 时，同时用 LangGraph `SqliteSaver` 写入独立文件
+  `<facts 同目录>/langgraph-checkpoints.sqlite3`。
+- `thread_id` 固定等于 `run_id`；每个 Run 一个逻辑 thread，checkpoint 不跨 Run 混用。
+- LangGraph checkpoint 仅用于学习、观测和状态读取；现有
+  `ExecutionStore.checkpoints` 仍是恢复、租约围栏和副作用幂等的权威来源。
+- 生产 Worker 使用 SQLite saver；测试可以注入 `MemorySaver`。
+- 现有 `checkpoints` 表与 LangGraph 的 `checkpoints` 表位于不同 SQLite 文件，
+  schema 不共享。
+
 ### 执行协议检查项与待办（2026-10-25）
 
 | 检查项 | 状态 | 说明 |
@@ -224,14 +235,14 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 | Command | 部分通过 | 大部分写操作是持久化 Command；release/publish 仍由 API 同步执行 |
 | 输入哈希 | 已实现 | 仅 NodeExecution 级 input_hash + 分类重试，见 `docs/superpowers/specs/2026-10-25-node-execution-input-hash-design.md` |
 | 租约/心跳 | 通过 | 实现完整；心跳续租缺少直接测试 |
-| thread_id | 未按字面实现 | 全仓库无 `thread_id`，用 SQLite `checkpoints(run_id, node_execution_id)` 替代 |
+| thread_id | 已实现（双写） | LangGraph SqliteSaver 以 `thread_id=run_id` 记录图状态；自定义 checkpoint 仍是执行权威 |
 | 恢复 | 通过 | 从最近 checkpoint 继续，已完成节点不重跑 |
 
 待执行 TODO：
 
-- [ ] 决定 release / publish 是否命令化；当前仍由 API 同步执行
+- [x] release / publish 保持同步 API 执行，不命令化（已确认）
 - [ ] 补心跳续租测试：断言 Worker 每 15 秒延长 Run lease 与 Command `claimed_until`
-- [ ] 决定 `thread_id`：保持 `run_id` 作为 checkpoint 隔离键，或接入 LangGraph checkpointer
+- [x] thread_id 决策：接入 LangGraph SqliteSaver 双写，`thread_id=run_id`；自定义 checkpoint 保持权威
 - [ ] 补 Graph 层 `TokenPreflightError → waiting_for_human` 的原因码测试
 - [ ] 补 tokenizer 缺失/损坏时 fail-closed 的 Provider 调用计数测试
 - [ ] 评估 Provider 单次调用结果缓存（input_hash 的更细粒度复用）
