@@ -260,6 +260,17 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 - Quality/Source/Release gate 只对新 Run（`langgraph_flow_version=1`）启用；
   旧 Run 与自定义 `_resume_state` 路径保持原行为。
 
+### effect 幂等账本
+
+- SQLite v18 新增 `node_effects`：以 `(run_id, node, input_hash, effect_key)`
+  唯一标识一次 Artifact 副作用，记录 artifact id/version/content hash。
+- 新 Run 的 Artifact 写入同时登记 effect；节点重跑命中 effect 时复用已提交
+  Artifact，不新增版本。
+- `after_artifact` 崩溃恢复优先从 `node_effects` 读取 recovery effect，
+  不再只依赖自定义 checkpoint 的 event id。
+- 自定义 `checkpoints` 仍保存节点状态/位置；`node_effects` 负责副作用身份，
+  两者在退场过渡期并存。
+
 ### 执行协议检查项与待办（2026-10-25）
 
 | 检查项 | 状态 | 说明 |
@@ -281,7 +292,7 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 - [x] Quality / Source / Release gate 迁移到 interrupt/resume（技术重试例外）
 - [ ] 补 Graph 层 `TokenPreflightError → waiting_for_human` 的原因码测试
 - [ ] 补 tokenizer 缺失/损坏时 fail-closed 的 Provider 调用计数测试
-- [ ] 建立 effect 幂等账本，替换新 Run 的 recover_quality/recover_repair/recover_verification
+- [x] 建立 effect 幂等账本，`after_artifact` 恢复改读 `node_effects`
 - [ ] 新 Run 停止写自定义 checkpoints，移除 _resume_state 新分支；旧 Run 清零后删表
 - [ ] 评估 Provider 单次调用结果缓存（input_hash 的更细粒度复用）
 - [ ] 明确不支持 Lesson 行/段/Token 级断点续传，仅支持节点与 Artifact 级恢复
@@ -362,7 +373,7 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 
 ## 课程生成约束
 
-- 现行 SQLite schema 版本为 17，可从 v7 起重复迁移。`intakes` 持久保存
+- 现行 SQLite schema 版本为 18，可从 v7 起重复迁移。`intakes` 持久保存
   `source_policy`、`expected_chapters`、`min_effective_chars`、`token_limit`，`runs` 保存
   `constraints_version`，`publications` 保存已发布课程。迁移前 Run 固定为版本 0，不追溯
   执行新约束；新 Run 固定为版本 1。
