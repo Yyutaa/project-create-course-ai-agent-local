@@ -188,6 +188,12 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
   同一版本；质量链按已提交 Event/Candidate 决定恢复，接管后复核若得出相反结果必须
   升级人工，不能静默翻转。恢复中的 `before_node` 保留上次提交的 Event ID；
   未提交的派生 workspace 文件可以从 SQLite 事实修复。
+- 新 Run 的 NodeExecution 记录规范化 `input_hash`。相同输入且已有成功结果时直接
+  复用并写 `node.reused` 事件，不新建 NodeExecution；活着的同输入执行返回 `busy`；
+  旧 Run 和 `input_hash=NULL` 的历史行不参与复用。失败按 `transient` /
+  `deterministic` / `business` / `unknown` 分类，仅 transient 自动重试；同一
+  input_hash 累计 3 次 FAILED 后转人工。只有显式 `QUALITY_REVIEW retry` 可以对
+  当前节点绕过该拒绝。SQLite schema 为 15。
 - STOP 受理即持久设置停止请求；若节点已开始，可完成当前有效提交，但下一节点的
   `STARTED` 必须被阻止。不得用强杀代替协作停止。RESUME 仅从合法停止/人工等待
   checkpoint 继续，不代表业务失败阶段自动重试。REVISE 持久保存有长度上限的人工
@@ -210,6 +216,26 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
   已提交事实的幂等与旧租约围栏，不声称 Provider 调用 exactly-once。
 - 启动端口固定为 API 8002、Vite 5176；Worker 无 HTTP 端口。冻结契约与限制见
   本节约定。
+
+### 执行协议检查项与待办（2026-10-25）
+
+| 检查项 | 状态 | 说明 |
+|---|---|---|
+| Command | 部分通过 | 大部分写操作是持久化 Command；release/publish 仍由 API 同步执行 |
+| 输入哈希 | 已实现 | 仅 NodeExecution 级 input_hash + 分类重试，见 `docs/superpowers/specs/2026-10-25-node-execution-input-hash-design.md` |
+| 租约/心跳 | 通过 | 实现完整；心跳续租缺少直接测试 |
+| thread_id | 未按字面实现 | 全仓库无 `thread_id`，用 SQLite `checkpoints(run_id, node_execution_id)` 替代 |
+| 恢复 | 通过 | 从最近 checkpoint 继续，已完成节点不重跑 |
+
+待执行 TODO：
+
+- [ ] 决定 release / publish 是否命令化；当前仍由 API 同步执行
+- [ ] 补心跳续租测试：断言 Worker 每 15 秒延长 Run lease 与 Command `claimed_until`
+- [ ] 决定 `thread_id`：保持 `run_id` 作为 checkpoint 隔离键，或接入 LangGraph checkpointer
+- [ ] 补 Graph 层 `TokenPreflightError → waiting_for_human` 的原因码测试
+- [ ] 补 tokenizer 缺失/损坏时 fail-closed 的 Provider 调用计数测试
+- [ ] 评估 Provider 单次调用结果缓存（input_hash 的更细粒度复用）
+- [ ] 明确不支持 Lesson 行/段/Token 级断点续传，仅支持节点与 Artifact 级恢复
 
 ## 交付证据与风险迁移契约
 
@@ -287,7 +313,7 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 
 ## 课程生成约束
 
-- 现行 SQLite schema 版本为 14，可从 v7 起重复迁移。`intakes` 持久保存
+- 现行 SQLite schema 版本为 15，可从 v7 起重复迁移。`intakes` 持久保存
   `source_policy`、`expected_chapters`、`min_effective_chars`、`token_limit`，`runs` 保存
   `constraints_version`，`publications` 保存已发布课程。迁移前 Run 固定为版本 0，不追溯
   执行新约束；新 Run 固定为版本 1。
