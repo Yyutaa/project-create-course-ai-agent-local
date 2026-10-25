@@ -177,7 +177,8 @@ def test_source_missing_does_not_trigger_blueprint_replan(tmp_path):
     ), request_key="missing-source")
     with facts.connect() as connection:
         connection.execute(
-            "UPDATE runs SET mission_review_required=0 WHERE id=?", (run.id,),
+            "UPDATE runs SET mission_review_required=0, "
+            "langgraph_flow_version=0 WHERE id=?", (run.id,),
         )
         connection.execute("DELETE FROM snapshots WHERE run_id=?", (run.id,))
     runner.execute(run.id)

@@ -39,7 +39,8 @@ BatchIndex = Annotated[int, Field(ge=0)]
 ArtifactKind = Literal["mission", "blueprint", "batch_plan", "lesson", "quality"]
 ProducerRole = AgentRole | Literal["system"]
 GraphNode = StageName | Literal[
-    "repair", "verification", "mission_gate", "route_error",
+    "repair", "verification", "mission_gate", "quality_gate",
+    "source_gate", "release_gate", "route_error",
 ]
 GraphOutcome = Literal[
     "pending", "succeeded", "failed", "waiting_for_human", "stopped", "unknown"
@@ -66,6 +67,13 @@ class LoopCounts(BaseModel):
     finding_attempts: dict[str, int] = Field(default_factory=dict)
 
 
+class ReleaseDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["prepare", "stop"]
+    reason: NonEmptyText
+
+
 class GraphState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -77,6 +85,10 @@ class GraphState(BaseModel):
     active_finding_id: str | None = None
     approval_status: ApprovalStatus = "not_requested"
     mission_decision: Literal["approve", "revise"] | None = None
+    gate_context: Literal["quality", "verification"] | None = None
+    gate_reason: str | None = None
+    source_gate_context: Literal["blueprint", "generation"] | None = None
+    release_decision: ReleaseDecision | None = None
     pending_interrupt_id: str | None = None
     loop_counts: LoopCounts = Field(default_factory=LoopCounts)
     last_outcome: GraphOutcome = "pending"
@@ -272,13 +284,6 @@ class QualitySummary(BaseModel):
     verification_results: list[GateResult] = Field(default_factory=list)
     verification_links: list[VerificationLink] = Field(default_factory=list)
     resolved_finding_ids: list[NonEmptyText] = Field(default_factory=list)
-
-
-class ReleaseDecision(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    action: Literal["prepare", "stop"]
-    reason: NonEmptyText
 
 
 class Publication(BaseModel):

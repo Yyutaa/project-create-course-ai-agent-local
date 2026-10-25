@@ -83,6 +83,10 @@ def route_after_mission_gate(state: GraphState) -> str:
 
 
 def route_after_blueprint(state: GraphState) -> str:
+    if state.last_outcome == "succeeded" and (
+        state.exit_reason == "source_gate_required"
+    ):
+        return "source_gate"
     return _route_standard(state, "batch_plan")
 
 
@@ -94,6 +98,8 @@ def route_after_batch_plan(state: GraphState) -> str:
 
 def route_after_generation(state: GraphState) -> str:
     if state.last_outcome == "succeeded":
+        if state.exit_reason == "source_gate_required":
+            return "source_gate"
         if state.exit_reason == "more_batches":
             return "generation"
         if state.exit_reason == "all_batches_complete":
@@ -110,6 +116,7 @@ def route_after_quality(state: GraphState) -> str:
             "all_lessons_ready": "release",
             "more_lessons": "quality",
             "repair_needed": "repair",
+            "quality_gate_required": "quality_gate",
         }.get(state.exit_reason or "", "route_error")
     if state.last_outcome in ("failed", "waiting_for_human"):
         return END
@@ -120,6 +127,25 @@ def route_after_repair(state: GraphState) -> str:
     return _route_standard(state, "verification")
 
 
+def route_after_release_gate(state: GraphState) -> str:
+    if state.last_outcome != "succeeded":
+        return _route_standard(state, "release")
+    if state.approval_status in ("prepare", "stop"):
+        return "release"
+    return "route_error"
+
+
+def route_after_source_gate(state: GraphState) -> str:
+    if state.last_outcome != "succeeded":
+        return _route_standard(state, "blueprint")
+    if state.exit_reason == "source_retry":
+        return (
+            "generation" if state.source_gate_context == "generation"
+            else "blueprint"
+        )
+    return "route_error"
+
+
 def route_after_verification(state: GraphState) -> str:
     if state.last_outcome == "succeeded":
         return {
@@ -127,9 +153,25 @@ def route_after_verification(state: GraphState) -> str:
             "candidate_human_accepted": "quality",
             "all_lessons_ready": "release",
             "repair_needed": "repair",
+            "quality_gate_required": "quality_gate",
         }.get(state.exit_reason or "", "route_error")
     if state.last_outcome in ("failed", "waiting_for_human"):
         return END
+    return "route_error"
+
+
+def route_after_quality_gate(state: GraphState) -> str:
+    if state.last_outcome != "succeeded":
+        return _route_standard(state, "quality")
+    if state.exit_reason == "quality_retry":
+        return (
+            "verification" if state.gate_context == "verification"
+            else "quality"
+        )
+    if state.exit_reason == "all_lessons_ready":
+        return "release"
+    if state.exit_reason in ("more_lessons", "candidate_human_accepted"):
+        return "quality"
     return "route_error"
 
 
@@ -180,7 +222,29 @@ class WorkflowNodes:
     def verification(self, state: GraphState) -> dict:
         return self._stage(state, "quality", self._verification)
 
+    def release_gate(self, state: GraphState) -> dict:
+        value = interrupt({
+            "type": "release_decision",
+            "run_id": state.run_id,
+        })
+        if not isinstance(value, dict):
+            raise GraphRouteError("Release gate resume payload 无效")
+        action = value.get("action")
+        reason = value.get("reason")
+        if action not in ("prepare", "stop"):
+            raise GraphRouteError("Release gate resume action 无效")
+        if not isinstance(reason, str) or not reason.strip():
+            raise GraphRouteError("Release gate 缺少人工说明")
+        decision = ReleaseDecision(action=action, reason=reason.strip())
+        return {
+            "current_node": "release_gate",
+            "approval_status": decision.action,
+            "release_decision": decision,
+            "last_outcome": "succeeded",
+        }
+
     def release(self, state: GraphState) -> dict:
+        decision = state.release_decision or self.release_decision
         if state.approval_status == "not_requested":
             with self.runner._lock:
                 run = self.runner._current(state.run_id)
@@ -197,12 +261,12 @@ class WorkflowNodes:
             }
         if (
             state.approval_status in ("prepare", "stop")
-            and self.release_decision is not None
-            and self.release_decision.action == state.approval_status
+            and decision is not None
+            and decision.action == state.approval_status
         ):
             self.runner._record_release_decision(
                 state.run_id,
-                self.release_decision,
+                decision,
                 self.request_key,
             )
             return {
@@ -434,6 +498,44 @@ class WorkflowNodes:
             "last_outcome": "succeeded",
         }
 
+    def _source_gate_or_wait(
+        self, state: GraphState, index: int, context: str, reason: str,
+    ) -> dict:
+        run = self.runner.get(state.run_id)
+        if run.langgraph_flow_version == 1:
+            return {
+                "current_node": context,
+                "source_gate_context": context,
+                "last_outcome": "succeeded",
+                "exit_reason": "source_gate_required",
+            }
+        self.runner._mark_waiting(state.run_id, index, reason)
+        return {
+            "current_node": context,
+            "last_outcome": "waiting_for_human",
+            "exit_reason": reason,
+        }
+
+    def source_gate(self, state: GraphState) -> dict:
+        context = state.source_gate_context
+        if context not in ("blueprint", "generation"):
+            raise GraphRouteError("Source gate 缺少上下文")
+        value = interrupt({
+            "type": "source_review",
+            "run_id": state.run_id,
+            "context": context,
+        })
+        if not isinstance(value, dict):
+            raise GraphRouteError("Source gate resume payload 无效")
+        if value.get("action") not in ("approve", "retry_search"):
+            raise GraphRouteError("Source gate resume action 无效")
+        return {
+            "current_node": "source_gate",
+            "source_gate_context": context,
+            "last_outcome": "succeeded",
+            "exit_reason": "source_retry",
+        }
+
     def _blueprint(self, state: GraphState, index: int) -> dict:
         run = self.runner.get(state.run_id)
         mission_ref = self._ref(state, "mission")
@@ -456,13 +558,9 @@ class WorkflowNodes:
             self.runner.source_runtime if run.source_evidence_version == 1 else None
         )
         if run.source_evidence_version == 1 and source_runtime is None:
-            self.runner._mark_waiting(
-                state.run_id, index, "source_evidence_insufficient",
+            return self._source_gate_or_wait(
+                state, index, "blueprint", "source_evidence_insufficient",
             )
-            return {
-                "current_node": "blueprint", "last_outcome": "waiting_for_human",
-                "exit_reason": "source_evidence_insufficient",
-            }
         pack = self.context.for_blueprint(
             state.run_id,
             mission_ref,
@@ -495,13 +593,9 @@ class WorkflowNodes:
         if source_runtime is not None and not source_runtime.facts.summary_pack(
             state.run_id
         ):
-            self.runner._mark_waiting(
-                state.run_id, index, "source_evidence_insufficient",
+            return self._source_gate_or_wait(
+                state, index, "blueprint", "source_evidence_insufficient",
             )
-            return {
-                "current_node": "blueprint", "last_outcome": "waiting_for_human",
-                "exit_reason": "source_evidence_insufficient",
-            }
         result = assign_blueprint_ids(candidate)
         self.runner._write_role_success(
             "blueprint",
@@ -626,13 +720,9 @@ class WorkflowNodes:
             source_runtime is None
             or not source_runtime.facts.summary_pack(state.run_id)
         ):
-            self.runner._mark_waiting(
-                state.run_id, index, "source_evidence_insufficient",
+            return self._source_gate_or_wait(
+                state, index, "generation", "source_evidence_insufficient",
             )
-            return {
-                "current_node": "generation", "last_outcome": "waiting_for_human",
-                "exit_reason": "source_evidence_insufficient",
-            }
         if run.batch_plan is None or run.blueprint is None:
             raise ValueError("Generation 缺少 Blueprint 或 Batch Plan")
         if (
@@ -802,6 +892,100 @@ class WorkflowNodes:
             "exit_reason": reason,
         }
 
+    def _quality_gate_or_wait(
+        self, state: GraphState, index: int, reason: str,
+        summary: QualitySummary, sources: list, context: str,
+        *, waiting_exit: str | None = None,
+    ) -> dict:
+        run = self.runner.get(state.run_id)
+        if run.langgraph_flow_version == 1:
+            self.runner._persist_system_artifact(
+                state.run_id, "quality", summary, sources,
+            )
+            quality_ref = self.runner._source_refs(state.run_id, ("quality",))[0]
+            return {
+                "current_node": context,
+                "artifact_refs": {
+                    **state.artifact_refs, "quality": quality_ref,
+                },
+                "gate_context": context,
+                "gate_reason": reason,
+                "last_outcome": "succeeded",
+                "exit_reason": "quality_gate_required",
+            }
+        self.runner._mark_waiting(
+            state.run_id, index, reason, summary, "system", sources,
+        )
+        result = {
+            "current_node": context,
+            "last_outcome": "waiting_for_human",
+        }
+        if waiting_exit is not None:
+            result["exit_reason"] = waiting_exit
+        return result
+
+    def quality_gate(self, state: GraphState) -> dict:
+        context = state.gate_context
+        if context not in ("quality", "verification"):
+            raise GraphRouteError("Quality gate 缺少上下文")
+        value = interrupt({
+            "type": "quality_review",
+            "run_id": state.run_id,
+            "context": context,
+            "reason": state.gate_reason,
+        })
+        if not isinstance(value, dict):
+            raise GraphRouteError("Quality gate resume payload 无效")
+        action = value.get("action")
+        reason = value.get("reason")
+        if action not in ("accept", "retry"):
+            raise GraphRouteError("Quality gate resume action 无效")
+        if action == "accept" and (
+            not isinstance(reason, str) or not reason.strip()
+        ):
+            raise GraphRouteError("Quality gate accept 缺少说明")
+        run = self.runner.get(state.run_id)
+        if run.blueprint is None or state.quality_cursor >= len(
+            run.blueprint.lessons
+        ):
+            raise GraphRouteError("Quality gate 缺少当前章节")
+        if action == "retry":
+            return {
+                "current_node": "quality_gate",
+                "last_outcome": "succeeded",
+                "exit_reason": "quality_retry",
+            }
+        cursor = state.quality_cursor + 1
+        all_done = cursor == len(run.blueprint.lessons)
+        if all_done:
+            self.runner._mark_stage_succeeded(
+                state.run_id, 5,
+                f"{cursor} 章质量 Gate 已通过人工确认",
+            )
+        updates = {
+            "current_node": "quality_gate",
+            "quality_cursor": cursor,
+            "artifact_refs": state.artifact_refs,
+            "gate_context": None,
+            "gate_reason": None,
+            "last_outcome": "succeeded",
+            "exit_reason": (
+                "all_lessons_ready" if all_done
+                else "candidate_human_accepted" if context == "verification"
+                else "more_lessons"
+            ),
+        }
+        if context == "verification":
+            candidate_ref = state.artifact_refs.get("candidate")
+            if candidate_ref is None:
+                raise GraphRouteError("Quality gate 缺少 Candidate 引用")
+            lesson_id = run.blueprint.lessons[state.quality_cursor].lesson_id
+            refs = dict(state.artifact_refs)
+            refs[f"lesson:{lesson_id}"] = candidate_ref
+            updates["artifact_refs"] = refs
+            updates["active_finding_id"] = None
+        return updates
+
     def _quality(self, state: GraphState, index: int) -> dict:
         run = self.runner.get(state.run_id)
         if run.blueprint is None or state.quality_cursor >= len(run.blueprint.lessons):
@@ -862,46 +1046,27 @@ class WorkflowNodes:
         if any(item.status != "pass" for item in report.results):
             character_finding = self._character_finding(report.findings)
             if character_finding is not None:
-                self.runner._mark_waiting(
-                    state.run_id,
-                    index,
-                    "lesson_effective_chars_below_minimum",
-                    summary,
-                    "system",
-                    quality_sources,
+                return self._quality_gate_or_wait(
+                    state, index, "lesson_effective_chars_below_minimum",
+                    summary, quality_sources, "quality",
                 )
-                return {"current_node": "quality", "last_outcome": "waiting_for_human"}
             finding = report.findings[0] if report.findings else None
             if finding is None or finding.category == "fact":
-                self.runner._mark_waiting(
-                    state.run_id,
-                    index,
-                    "质量证据需要人工复核",
-                    summary,
-                    "system",
-                    quality_sources,
+                return self._quality_gate_or_wait(
+                    state, index, "质量证据需要人工复核",
+                    summary, quality_sources, "quality",
                 )
-                return {"current_node": "quality", "last_outcome": "waiting_for_human"}
             if not self._auto_repairable(run, finding):
-                self.runner._mark_waiting(
-                    state.run_id, index, "quality_rule_requires_human",
-                    summary, "system", quality_sources,
+                return self._quality_gate_or_wait(
+                    state, index, "quality_rule_requires_human",
+                    summary, quality_sources, "quality",
+                    waiting_exit="quality_rule_requires_human",
                 )
-                return {
-                    "current_node": "quality",
-                    "last_outcome": "waiting_for_human",
-                    "exit_reason": "quality_rule_requires_human",
-                }
             if not self._has_repair_budget(state, finding.finding_id):
-                self.runner._mark_waiting(
-                    state.run_id,
-                    index,
-                    "返工预算耗尽，需要人工处理",
-                    summary,
-                    "system",
-                    quality_sources,
+                return self._quality_gate_or_wait(
+                    state, index, "返工预算耗尽，需要人工处理",
+                    summary, quality_sources, "quality",
                 )
-                return {"current_node": "quality", "last_outcome": "waiting_for_human"}
             self.runner._persist_system_artifact(
                 state.run_id, "quality", summary, quality_sources
             )
@@ -1362,11 +1527,11 @@ class WorkflowNodes:
         if prior_decision and prior_decision != (
             "candidate.accepted" if passed else "candidate.rejected"
         ):
-            self.runner._mark_waiting(
-                state.run_id, index, "接管后验证结论与已提交决定不一致，需要人工处理",
-                summary, "system", verification_sources,
+            return self._quality_gate_or_wait(
+                state, index,
+                "接管后验证结论与已提交决定不一致，需要人工处理",
+                summary, verification_sources, "verification",
             )
-            return {"current_node": "verification", "last_outcome": "waiting_for_human"}
         if passed:
             if prior_decision != "candidate.accepted":
                 self.runner._accept_repair_candidate(state.run_id, candidate_ref)
@@ -1400,26 +1565,17 @@ class WorkflowNodes:
         if prior_decision != "candidate.rejected":
             self.runner._reject_repair_candidate(state.run_id, candidate_ref)
         if self._character_finding(report.findings) is not None:
-            self.runner._mark_waiting(
-                state.run_id,
-                index,
-                "lesson_effective_chars_below_minimum",
-                summary,
-                "system",
-                verification_sources,
+            return self._quality_gate_or_wait(
+                state, index, "lesson_effective_chars_below_minimum",
+                summary, verification_sources, "verification",
             )
-            return {"current_node": "verification", "last_outcome": "waiting_for_human"}
         finding = report.findings[0] if report.findings else None
         if finding is not None and not self._auto_repairable(run, finding):
-            self.runner._mark_waiting(
-                state.run_id, index, "quality_rule_requires_human",
-                summary, "system", verification_sources,
+            return self._quality_gate_or_wait(
+                state, index, "quality_rule_requires_human",
+                summary, verification_sources, "verification",
+                waiting_exit="quality_rule_requires_human",
             )
-            return {
-                "current_node": "verification",
-                "last_outcome": "waiting_for_human",
-                "exit_reason": "quality_rule_requires_human",
-            }
         next_counts = (
             self._advance_finding_counts(state, summary.evidence_findings, finding)
             if finding is not None
@@ -1427,15 +1583,11 @@ class WorkflowNodes:
         )
         next_state = state.model_copy(update={"loop_counts": next_counts})
         if finding is None or not self._has_repair_budget(next_state, finding.finding_id):
-            self.runner._mark_waiting(
-                state.run_id,
-                index,
+            return self._quality_gate_or_wait(
+                state, index,
                 "Candidate 未通过独立验证，需人工处理",
-                summary,
-                "system",
-                verification_sources,
+                summary, verification_sources, "verification",
             )
-            return {"current_node": "verification", "last_outcome": "waiting_for_human"}
         self.runner._persist_system_artifact(
             state.run_id, "quality", summary, verification_sources
         )
@@ -1619,12 +1771,21 @@ def build_graph(
         "mission_gate", instrument("mission_gate", nodes.mission_gate),
     )
     builder.add_node("blueprint", instrument("blueprint", nodes.blueprint))
+    builder.add_node(
+        "source_gate", instrument("source_gate", nodes.source_gate),
+    )
     builder.add_node("batch_plan", instrument("batch_plan", nodes.batch_plan))
     builder.add_node("generation", instrument("generation", nodes.generation))
     builder.add_node("quality", instrument("quality", nodes.quality))
+    builder.add_node(
+        "quality_gate", instrument("quality_gate", nodes.quality_gate),
+    )
     builder.add_node("repair", instrument("repair", nodes.repair))
     builder.add_node("verification", instrument("verification", nodes.verification))
     builder.add_node("release", instrument("release", nodes.release))
+    builder.add_node(
+        "release_gate", instrument("release_gate", nodes.release_gate),
+    )
     builder.add_node("route_error", instrument("route_error", nodes.route_error))
 
     builder.add_conditional_edges(
@@ -1650,11 +1811,34 @@ def build_graph(
         "mission_gate", route_after_mission_gate,
     )
     builder.add_conditional_edges("blueprint", route_after_blueprint)
+    builder.add_conditional_edges(
+        "source_gate", route_after_source_gate,
+    )
     builder.add_conditional_edges("batch_plan", route_after_batch_plan)
     builder.add_conditional_edges("generation", route_after_generation)
-    builder.add_conditional_edges("quality", route_after_quality)
+    def route_release_for_run(state: GraphState, target: str) -> str:
+        if target != "release":
+            return target
+        run = runner.get(state.run_id)
+        return "release_gate" if run.langgraph_flow_version == 1 else "release"
+
+    builder.add_conditional_edges(
+        "quality", lambda state: route_release_for_run(
+            state, route_after_quality(state),
+        ),
+    )
+    builder.add_conditional_edges(
+        "quality_gate", route_after_quality_gate,
+    )
     builder.add_conditional_edges("repair", route_after_repair)
-    builder.add_conditional_edges("verification", route_after_verification)
+    builder.add_conditional_edges(
+        "verification", lambda state: route_release_for_run(
+            state, route_after_verification(state),
+        ),
+    )
+    builder.add_conditional_edges(
+        "release_gate", route_after_release_gate,
+    )
     builder.add_conditional_edges("release", route_after_release)
     builder.add_edge("route_error", END)
     if checkpointer is not None:

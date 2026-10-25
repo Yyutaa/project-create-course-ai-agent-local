@@ -12,7 +12,7 @@ from app.catalog import CourseSummary, write_course
 from app.v0 import publishing
 from app.v0.agents import AGENT_DEFINITIONS, AgentExecutor
 from app.v0.artifact_tools import ArtifactTools
-from app.v0.execution import StopRequested
+from app.v0.execution import ExecutionStore, StopRequested
 from langgraph.types import Command
 
 from app.v0.langgraph_checkpoint import (
@@ -347,11 +347,18 @@ class V0Runner:
         if state is None:
             return
         node = state.current_node
-        reason = (
-            "mission_review_required"
-            if node == "mission_gate" else f"{node}_interrupt"
-        )
-        index = 1 if node == "mission_gate" else self.stage_index(node)
+        if node == "mission_gate":
+            reason, index = "mission_review_required", 1
+        elif node == "quality_gate":
+            reason = state.gate_reason or "quality_review_required"
+            index = 5
+        elif node == "source_gate":
+            reason = "source_evidence_insufficient"
+            index = 2 if state.source_gate_context == "blueprint" else 4
+        elif node == "release_gate":
+            reason, index = "release_decision_required", 6
+        else:
+            reason, index = f"{node}_interrupt", self.stage_index(node)
         interrupt_id = getattr(interrupts[0], "id", None)
         self._mark_waiting(state.run_id, index, reason)
         waiting_state = state.model_copy(update={
@@ -476,7 +483,8 @@ class V0Runner:
                 if review is not None else None
             )
             source_summary = (
-                self.source_runtime.facts.summary_pack(state.run_id)
+                None if node == "source_gate"
+                else self.source_runtime.facts.summary_pack(state.run_id)
                 if self.source_runtime is not None
                 and run.source_evidence_version == 1
                 else None
@@ -501,6 +509,10 @@ class V0Runner:
             reuse_enabled=(
                 run.context_contract_version == 1
                 and self._recovery_effect is None
+                and not (
+                    state.exit_reason == "source_retry"
+                    and node in ("blueprint", "generation")
+                )
             ),
             retry_override=self._retry_override_node == node,
             recovery_event_id=(
@@ -592,6 +604,22 @@ class V0Runner:
             replay = self.store.release_replay(run_id, request_key, decision)
             if replay is not None:
                 return replay
+        run = self.get(run_id)
+        if run.langgraph_flow_version == 1:
+            self._invoke_graph(
+                run_id,
+                None,
+                request_key=request_key,
+                resume_payload={
+                    "action": decision.action,
+                    "reason": decision.reason,
+                },
+            )
+            if self.store is not None:
+                ExecutionStore(self.store.path).finish_human_gate(
+                    run_id, "release_gate",
+                )
+            return self.get(run_id)
         self._invoke_graph(
             run_id,
             GraphState(

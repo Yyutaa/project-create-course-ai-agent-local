@@ -12,6 +12,7 @@ from app.v0.graph import (
     route_start,
 )
 from app.v0.batching import assign_blueprint_ids, build_batch_plan
+from app.v0.execution import ExecutionStore
 from app.v0.provider import FakeProvider
 from app.v0.provider import AgentResponse, ProviderError
 from app.v0.quality_loop import check_markdown
@@ -29,6 +30,7 @@ from app.v0.schemas import (
     ReleaseDecision,
 )
 from app.v0.storage import FactStore
+from app.v0.worker import Worker
 
 
 COURSE = CourseInput(
@@ -190,7 +192,11 @@ def test_new_run_without_source_runtime_waits_before_blueprint_artifact(tmp_path
     created = runner.create(COURSE, request_key="source-runtime-required")
     with runner.store.connect() as connection:
         connection.execute(
-            "UPDATE runs SET mission_review_required=0 WHERE id=?", (created.id,)
+            "UPDATE runs SET mission_review_required=0, "
+            "langgraph_flow_version=0 WHERE id=?", (created.id,)
+        )
+        connection.execute(
+            "DELETE FROM snapshots WHERE run_id=?", (created.id,),
         )
 
     runner.execute(created.id)
@@ -477,12 +483,15 @@ def test_graph_declares_seven_stages_and_quality_loop_nodes():
         "mission",
         "mission_gate",
         "blueprint",
+        "source_gate",
         "batch_plan",
         "generation",
         "quality",
+        "quality_gate",
         "repair",
         "verification",
         "release",
+        "release_gate",
         "route_error",
         "__end__",
     }
@@ -630,8 +639,8 @@ def test_new_run_repairs_only_current_humanizer_finding_and_verifies(tmp_path):
     ), request_key="new-role-pack")
     with facts.connect() as connection:
         connection.execute(
-            "UPDATE runs SET mission_review_required=0, source_evidence_version=0 "
-            "WHERE id=?", (created.id,),
+            "UPDATE runs SET mission_review_required=0, source_evidence_version=0, "
+            "langgraph_flow_version=0 WHERE id=?", (created.id,),
         )
         connection.execute("DELETE FROM snapshots WHERE run_id=?", (created.id,))
 
@@ -691,7 +700,9 @@ def test_new_run_unknown_language_rule_waits_instead_of_guessing_repair(tmp_path
         )
         connection.execute("DELETE FROM snapshots WHERE run_id=?", (created.id,))
 
-    runner.execute(created.id)
+    commands = ExecutionStore(facts.path)
+    commands.accept(created.id, "START", {}, "unknown-language-rule")
+    Worker(facts.path, provider=provider, owner="worker-a").run_once()
     result = runner.get(created.id)
     assert result.stages[5].status == "waiting_for_human"
     assert result.stages[5].failure_reason == "quality_rule_requires_human"

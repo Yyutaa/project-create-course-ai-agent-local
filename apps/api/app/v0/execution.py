@@ -507,9 +507,18 @@ class ExecutionStore:
             ):
                 raise ValueError("来源审批 checkpoint 已过期")
             state = GraphState.model_validate_json(checkpoint["state_json"])
-            if state.current_node not in ("blueprint", "generation"):
+            if state.current_node not in (
+                "blueprint", "generation", "source_gate",
+            ):
                 raise ValueError("当前节点不支持来源审批")
-            stage_index = 2 if state.current_node == "blueprint" else 4
+            context = (
+                state.source_gate_context
+                if state.current_node == "source_gate"
+                else state.current_node
+            )
+            if context not in ("blueprint", "generation"):
+                raise ValueError("来源审批缺少有效阶段上下文")
+            stage_index = 2 if context == "blueprint" else 4
             stage = run.stages[stage_index]
             if (
                 run.source_evidence_version != 1
@@ -591,7 +600,7 @@ class ExecutionStore:
             event_id = connection.execute(
                 "INSERT INTO events(run_id, stage, type, status, request_key, "
                 "created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (command.run_id, state.current_node, f"source.{action}",
+                (command.run_id, context, f"source.{action}",
                  run.status, command.id, now),
             ).lastrowid
             run.revision = event_id
@@ -669,8 +678,16 @@ class ExecutionStore:
                 run.stages[5].status != "waiting_for_human"
             ):
                 raise ValueError("Run 未等待 Quality 人工处理")
-            if state.current_node not in ("quality", "verification"):
+            if state.current_node not in (
+                "quality", "verification", "quality_gate",
+            ):
                 raise ValueError("当前等待节点不支持 Quality 审批")
+            context = (
+                state.gate_context
+                if state.current_node == "quality_gate"
+                else "verification" if state.current_node == "verification"
+                else "quality"
+            )
             if not technical_retry:
                 quality = connection.execute(
                     "SELECT artifact_id, version, content_hash FROM artifacts "
@@ -690,7 +707,7 @@ class ExecutionStore:
                 raise ValueError("Quality 审批缺少当前章节")
             lesson_id = run.blueprint.lessons[state.quality_cursor].lesson_id
             current_lesson = state.artifact_refs.get(
-                "candidate" if state.current_node == "verification"
+                "candidate" if context == "verification"
                 else f"lesson:{lesson_id}"
             )
             if current_lesson != lesson_ref:
@@ -703,7 +720,7 @@ class ExecutionStore:
             ).fetchone()
             if lesson is None:
                 raise ValueError("Quality 审批 Lesson 引用无效")
-            if action == "accept" and state.current_node == "verification":
+            if action == "accept" and context == "verification":
                 candidate = connection.execute(
                     "SELECT content_json, producer_role FROM artifacts WHERE run_id=? "
                     "AND artifact_id=? AND version=? AND kind='lesson' "
@@ -755,7 +772,7 @@ class ExecutionStore:
                 self._checkpoint(
                     connection, command.run_id, None, "after_node", retry_state, event_id,
                 )
-            if action == "accept" and state.current_node == "verification":
+            if action == "accept" and context == "verification":
                 refs = dict(state.artifact_refs)
                 refs[f"lesson:{lesson_id}"] = lesson_ref
                 decision_state = state.model_copy(update={
@@ -872,7 +889,8 @@ class ExecutionStore:
                             outcome="busy", execution_id=row["id"],
                             lease_epoch=epoch,
                         )
-                if not retry_override:
+                is_gate = node.endswith("_gate")
+                if not retry_override and not is_gate:
                     for row in connection.execute(
                         "SELECT * FROM node_executions WHERE run_id=? AND node=? "
                         "AND input_hash=? AND status='COMMITTED' "
@@ -904,7 +922,9 @@ class ExecutionStore:
                                 run_id, node,
                                 run_row["status"] if run_row else "unknown",
                                 "复用相同输入的已完成节点结果",
-                                str(row["id"]), row["id"], input_hash, now,
+                                str(row["id"]),
+                                f"reuse:{row['id']}:{uuid4().hex}",
+                                input_hash, now,
                             ),
                         )
                         return NodeClaim(
@@ -1010,7 +1030,8 @@ class ExecutionStore:
             )
             connection.execute(
                 "UPDATE node_executions SET status=?, after_checkpoint_id=?, "
-                "error=?, lease_epoch=?, failure_class=?, updated_at=? WHERE id=?",
+                "error=?, lease_epoch=?, failure_class=?, "
+                "pending_interrupt_id=NULL, updated_at=? WHERE id=?",
                 (
                     "FAILED" if failed else "COMMITTED", checkpoint_id,
                     error[:200] if error else None, epoch,
@@ -1055,6 +1076,22 @@ class ExecutionStore:
                 (run_id,),
             ).fetchone()
         return row["pending_interrupt_id"] if row else None
+
+    def finish_human_gate(self, run_id: str, node: str) -> None:
+        """Reconcile an API-driven human decision without a Worker lease."""
+        with self.facts.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT id FROM node_executions WHERE run_id=? AND node=? "
+                "AND status='WAITING' ORDER BY rowid DESC LIMIT 1",
+                (run_id, node),
+            ).fetchone()
+            if row is not None:
+                connection.execute(
+                    "UPDATE node_executions SET status='COMMITTED', "
+                    "pending_interrupt_id=NULL, updated_at=? WHERE id=?",
+                    (_utc().isoformat(), row["id"]),
+                )
 
     def stop_requested(self, run_id: str) -> bool:
         with self.facts.connect() as connection:
@@ -1271,8 +1308,15 @@ class ExecutionStore:
         quality_review = None
         if checkpoint is not None and checkpoint["position"] == "after_node":
             state = GraphState.model_validate_json(checkpoint["state_json"])
-            if state.current_node in ("blueprint", "generation"):
-                stage = run.stages[2 if state.current_node == "blueprint" else 4]
+            if state.current_node in (
+                "blueprint", "generation", "source_gate",
+            ):
+                context = (
+                    state.source_gate_context
+                    if state.current_node == "source_gate"
+                    else state.current_node
+                )
+                stage = run.stages[2 if context == "blueprint" else 4]
                 if (
                     run.source_evidence_version == 1
                     and run.status == "waiting_for_human"
@@ -1308,16 +1352,24 @@ class ExecutionStore:
                 and run.stages[5].status == "waiting_for_human"
             )
             quality_ref = state.artifact_refs.get("quality")
+            context = (
+                state.gate_context
+                if state.current_node == "quality_gate"
+                else "verification" if state.current_node == "verification"
+                else "quality"
+            )
             if (
                 (technical_retry or manual_review)
-                and state.current_node in ("quality", "verification")
+                and state.current_node in (
+                    "quality", "verification", "quality_gate",
+                )
                 and (technical_retry or quality_ref is not None)
                 and run.blueprint is not None
                 and state.quality_cursor < len(run.blueprint.lessons)
             ):
                 lesson_id = run.blueprint.lessons[state.quality_cursor].lesson_id
                 lesson_ref = state.artifact_refs.get(
-                    "candidate" if state.current_node == "verification"
+                    "candidate" if context == "verification"
                     else f"lesson:{lesson_id}"
                 )
                 if lesson_ref is not None:

@@ -212,6 +212,33 @@ class Worker:
             decision = self.execution.apply_source_review(
                 command, self.owner, epoch,
             )
+            run = self.runner.get(run_id)
+            if (
+                run.langgraph_flow_version == 1
+                and self.execution.waiting_interrupt_id(run_id) is not None
+            ):
+                if not decision["resume"]:
+                    return
+                payload = {
+                    key: command.payload.get(key)
+                    for key in (
+                        "action", "reason", "candidate_id",
+                        "metadata_hash", "url", "expected_checkpoint_id",
+                    )
+                }
+                try:
+                    self.runner.execute(
+                        run_id, state=None, execution=self.execution,
+                        owner=self.owner, epoch=epoch,
+                        command_id=command.id, resume_payload=payload,
+                    )
+                except StopRequested:
+                    self._mark_stopped(run_id, epoch)
+                except TokenLimitReached as error:
+                    self._mark_token_stopped(run_id, epoch, error)
+                if self.runner.get(run_id).status == "failed":
+                    raise RuntimeError("Graph 节点业务失败；不自动重试")
+                return
             if not decision["resume"]:
                 return
             checkpoint = self.execution.last_checkpoint(run_id)
@@ -256,6 +283,28 @@ class Worker:
                     raise RuntimeError("Graph 节点业务失败；不自动重试")
                 if run.status != "running":
                     return
+            run = self.runner.get(run_id)
+            if (
+                run.langgraph_flow_version == 1
+                and self.execution.waiting_interrupt_id(run_id) is not None
+            ):
+                payload = {
+                    "action": command.payload.get("action"),
+                    "reason": command.payload.get("reason"),
+                }
+                try:
+                    self.runner.execute(
+                        run_id, state=None, execution=self.execution,
+                        owner=self.owner, epoch=epoch,
+                        command_id=command.id, resume_payload=payload,
+                    )
+                except StopRequested:
+                    self._mark_stopped(run_id, epoch)
+                except TokenLimitReached as error:
+                    self._mark_token_stopped(run_id, epoch, error)
+                if self.runner.get(run_id).status == "failed":
+                    raise RuntimeError("Graph 节点业务失败；不自动重试")
+                return
             state = self._resume_state(run_id)
             if state is None:
                 return
