@@ -271,6 +271,18 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 - 自定义 `checkpoints` 仍保存节点状态/位置；`node_effects` 负责副作用身份，
   两者在退场过渡期并存。
 
+### gate 等待状态解耦
+
+- SQLite v19 给 NodeExecution 增加 `waiting_state_json`；gate interrupt 时同时保存
+  waiting GraphState、`pending_interrupt_id` 和 `input_hash`。
+- 新 Run 的 Mission/Quality/Source gate 审批改读 NodeExecution 的 waiting state，
+  `checkpoint_id` 使用 NodeExecution ID，不再依赖 `last_checkpoint()`。
+- 旧 Run 仍回退到自定义 checkpoints。
+- Worker 对节点内崩溃的恢复仍使用自定义 checkpoint：LangGraph 的节点边界 checkpoint
+  不包含节点内部已提交 Artifact 进度，effect 账本本身不足以重建节点内循环状态。
+  下一步需要让 Generation/Blueprint 等节点从 `node_effects` 重建已完成子项，才能切换
+  Worker 到 LangGraph `invoke(None)` 并停止写自定义 checkpoints。
+
 ### 执行协议检查项与待办（2026-10-25）
 
 | 检查项 | 状态 | 说明 |
@@ -293,6 +305,8 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 - [ ] 补 Graph 层 `TokenPreflightError → waiting_for_human` 的原因码测试
 - [ ] 补 tokenizer 缺失/损坏时 fail-closed 的 Provider 调用计数测试
 - [x] 建立 effect 幂等账本，`after_artifact` 恢复改读 `node_effects`
+- [ ] 让 Generation/Blueprint 等节点从 node_effects 重建节点内进度
+- [ ] 切换 Worker 新 Run 恢复到 LangGraph invoke(None)
 - [ ] 新 Run 停止写自定义 checkpoints，移除 _resume_state 新分支；旧 Run 清零后删表
 - [ ] 评估 Provider 单次调用结果缓存（input_hash 的更细粒度复用）
 - [ ] 明确不支持 Lesson 行/段/Token 级断点续传，仅支持节点与 Artifact 级恢复
@@ -373,7 +387,7 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 
 ## 课程生成约束
 
-- 现行 SQLite schema 版本为 18，可从 v7 起重复迁移。`intakes` 持久保存
+- 现行 SQLite schema 版本为 19，可从 v7 起重复迁移。`intakes` 持久保存
   `source_policy`、`expected_chapters`、`min_effective_chars`、`token_limit`，`runs` 保存
   `constraints_version`，`publications` 保存已发布课程。迁移前 Run 固定为版本 0，不追溯
   执行新约束；新 Run 固定为版本 1。
