@@ -7,7 +7,7 @@ import {
   budgetTokenLabel,
   canResumeRun, canStartRun, canDecideRelease, canPublish,
   canReviewMission, canReviewQuality, courseContentHeading, courseCreationAction,
-  continuityLedgerLabels, pollInterval,
+  continuityLedgerLabels, pollInterval, runningPollInterval,
   runPath, shouldPoll, sourceReviewSummary, stageDisplayName,
 } from "./run-view";
 import { subscribeRun } from "./run-stream";
@@ -67,7 +67,7 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
     queryKey: ["run-content", runId],
     queryFn: () => api.runContent(runId!),
     enabled: Boolean(runId),
-    refetchInterval: run?.status === "running" ? (streamConnected ? 30_000 : 1000) : false,
+    refetchInterval: runningPollInterval(run, streamConnected, 1000),
   });
   const intakeQuery = useQuery({
     queryKey: ["intake", runId],
@@ -82,7 +82,7 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
     refetchInterval: (query) => {
       if (query.state.data?.commands.some((command) =>
         command.status === "ACCEPTED" || command.status === "CLAIMED"
-      )) return streamConnected ? 30_000 : 1000;
+      )) return streamConnected ? false : 1000;
       return pollInterval(run, streamConnected);
     },
   });
@@ -100,7 +100,7 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
     queryKey: ["evidence", runId],
     queryFn: () => api.evidence(runId!),
     enabled: Boolean(runId),
-    refetchInterval: run?.status === "running" ? (streamConnected ? 30_000 : 5000) : false,
+    refetchInterval: runningPollInterval(run, streamConnected, 5000),
   });
   const eventsQuery = useQuery({
     queryKey: ["events", runId],
@@ -112,10 +112,11 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
     queryKey: ["sources", runId],
     queryFn: () => api.sources(runId!),
     enabled: Boolean(runId && run?.source_evidence_version),
-    refetchInterval: run?.status === "running" ? (streamConnected ? 30_000 : 5000) : false,
+    refetchInterval: runningPollInterval(run, streamConnected, 5000),
   });
+  const pollable = Boolean(run && shouldPoll(run.status));
   useEffect(() => {
-    if (!runId || !run || !shouldPoll(run.status)) {
+    if (!runId || !pollable) {
       setStreamConnected(false);
       return;
     }
@@ -129,7 +130,7 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
       close();
       setStreamConnected(false);
     };
-  }, [runId, run?.status, queryClient]);
+  }, [runId, pollable, queryClient]);
   const executionSignature = executionQuery.data
     ? `${executionQuery.data.checkpoint?.id ?? ""}:${executionQuery.data.commands.map((command) => `${command.id}:${command.status}`).join(",")}`
     : "";

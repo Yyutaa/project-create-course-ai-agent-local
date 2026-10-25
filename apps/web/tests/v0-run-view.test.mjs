@@ -47,11 +47,23 @@ test("course content stays visible through quality and release", () => {
     null);
 });
 
-test("connected stream reduces polling while retaining a refresh fallback", () => {
-  assert.equal(runView.pollInterval({ status: "running" }, true), 30_000);
-  assert.equal(runView.pollInterval({ status: "waiting_for_human" }, true), 30_000);
+test("connected stream stops polling until the connection fails", () => {
+  assert.equal(runView.pollInterval({ status: "running" }, true), false);
+  assert.equal(runView.pollInterval({ status: "waiting_for_human" }, true), false);
+  assert.equal(runView.pollInterval({ status: "stopped" }, true), false);
   assert.equal(runView.pollInterval({ status: "running" }, false), 1_000);
+  assert.equal(runView.pollInterval({ status: "waiting_for_human" }, false), 5_000);
   assert.equal(runView.pollInterval({ status: "published" }, true), false);
+});
+
+test("running-only projections stop polling while the stream is connected", () => {
+  assert.equal(runView.runningPollInterval({ status: "running" }, true, 1000), false);
+  assert.equal(runView.runningPollInterval({ status: "running" }, false, 1000), 1000);
+  assert.equal(
+    runView.runningPollInterval({ status: "waiting_for_human" }, false, 5000),
+    false,
+  );
+  assert.equal(runView.runningPollInterval(undefined, false, 5000), false);
 });
 
 test("source review uses exact checkpoint and prevents generic resume", async () => {

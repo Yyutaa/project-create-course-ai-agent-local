@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { subscribeRun } from "../src/run-stream.ts";
 
-test("run stream reconnects through query invalidation and closes cleanly", () => {
+test("run stream coalesces changes, reports connection and closes cleanly", async () => {
   const original = globalThis.EventSource;
   const seen = [];
   class FakeEventSource {
@@ -19,6 +19,11 @@ test("run stream reconnects through query invalidation and closes cleanly", () =
     assert.equal(source.url, "/api/v0/runs/run%2F1/stream");
     source.onopen();
     source.listeners.get("run.changed")();
+    source.listeners.get("run.changed")();
+    source.listeners.get("run.changed")();
+    assert.deepEqual(seen, [true]);
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    assert.deepEqual(seen, [true, "refresh"]);
     source.onerror();
     assert.deepEqual(seen, [true, "refresh", false]);
     close();

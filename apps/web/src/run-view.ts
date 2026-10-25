@@ -109,9 +109,17 @@ export function shouldPoll(status: V0Run["status"]): boolean {
 }
 
 export function pollInterval(run?: Pick<V0Run, "status">, streamConnected = false): number | false {
-  if (!run || !shouldPoll(run.status)) return false;
-  if (streamConnected) return 30_000;
+  if (!run || !shouldPoll(run.status) || streamConnected) return false;
   return run.status === "running" ? 1000 : 5000;
+}
+
+export function runningPollInterval(
+  run: Pick<V0Run, "status"> | undefined,
+  streamConnected: boolean,
+  runningInterval: number,
+): number | false {
+  if (streamConnected || run?.status !== "running") return false;
+  return runningInterval;
 }
 
 function progress(run: V0Run): number {

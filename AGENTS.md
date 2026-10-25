@@ -362,7 +362,8 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 - SQLite v11 的 `run_change_seq` 是按 Run 单调递增的读取变化游标，相关事实与投影表的
   写入在同一事务中推进它；事务回滚不得发出变化。它不替代 Event、Artifact 或 Snapshot。
 - `GET /api/v0/runs/{run_id}/stream` 只发送 Run ID 和变化序号。前端通过 SSE 通知
-  失效 TanStack Query 缓存，再从 REST 读取权威事实；断线时继续低频轮询校准。
+  失效 TanStack Query 缓存，再从 REST 读取权威事实；SSE 健康时停止常规轮询，
+  连接失败或断开时恢复原有轮询。
 - 七阶段 UI 仅改变显示名称与阅读方式，不改变固定阶段顺序、人工门禁或发布权。
 
 ## 代码规范
