@@ -134,6 +134,28 @@ class V0Runner:
             else self._runs[run_id].model_copy(deep=True)
         )
 
+    def find_effect_artifact(self, effect_key: str, kind: str) -> ArtifactRef | None:
+        if (
+            self._execution is None or self._execution_attempt is None
+            or self._execution_state is None or not self._execution_input_hash
+        ):
+            return None
+        effect = self._execution.find_effect(
+            self._execution_state.run_id,
+            self._execution_state.current_node,
+            self._execution_input_hash,
+            effect_key,
+        )
+        if effect is None:
+            return None
+        return ArtifactRef(
+            run_id=self._execution_state.run_id,
+            artifact_id=effect["artifact_id"],
+            version=effect["artifact_version"],
+            kind=kind,
+            content_hash=effect["content_hash"],
+        )
+
     def _commit(
         self,
         run: V0Run,

@@ -1016,6 +1016,65 @@ def test_new_context_run_recovers_committed_lesson_without_duplicate(tmp_path):
     assert commands.list_commands(run.id)[0].status == "APPLIED"
 
 
+def test_new_context_run_resumes_from_langgraph_without_custom_checkpoint(tmp_path):
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(CourseInput(
+        topic="变量", audience="初学者", goal="完成四章", language="zh",
+        expected_chapters=4, min_effective_chars=1,
+    ), "langgraph-recovery", enqueue_start=True)
+    with facts.connect() as connection:
+        connection.execute(
+            "UPDATE runs SET mission_review_required=0, source_evidence_version=0 "
+            "WHERE id=?", (run.id,),
+        )
+        connection.execute("DELETE FROM snapshots WHERE run_id=?", (run.id,))
+
+    class FourLessons(FakeProvider):
+        def invoke(self, request):
+            if request.role == "blueprint":
+                return AgentResponse(role="blueprint", payload={"lessons": [
+                    {"title": f"章节 {index}", "learning_goal": f"目标 {index}",
+                     "evidence": f"练习 {index}"} for index in range(4)
+                ]})
+            return super().invoke(request)
+
+    commands = ExecutionStore(facts.path)
+    first = Worker(facts.path, provider=FourLessons(), owner="worker-a")
+    command = commands.claim("worker-a")
+    epoch = commands.acquire(run.id, "worker-a")
+    persist = first.runner._persist_candidate
+
+    def crash_after_first(*args):
+        persist(*args)
+        raise SystemExit("simulated process death")
+
+    first.runner._persist_candidate = crash_after_first
+    with pytest.raises(SystemExit, match="process death"):
+        first._apply(command, epoch)
+    first_ref = [
+        item for item in facts.list_artifacts(run.id) if item.kind == "lesson"
+    ][0]
+
+    # The retired custom checkpoints are gone; recovery must use the
+    # LangGraph node-boundary checkpoint plus the effect ledger.
+    with facts.connect() as connection:
+        connection.execute("DELETE FROM checkpoints WHERE run_id=?", (run.id,))
+    commands.expire_for_test(run.id)
+
+    assert Worker(
+        facts.path, provider=FourLessons(), owner="worker-b",
+    ).run_once()
+    lessons = [
+        item for item in facts.list_artifacts(run.id) if item.kind == "lesson"
+    ]
+    assert len(lessons) == 4
+    assert lessons[0].artifact_id == first_ref.artifact_id
+    assert lessons[0].version == first_ref.version
+    assert facts.get_run(run.id).batch_plan is not None
+    assert commands.list_commands(run.id)[0].status == "APPLIED"
+
+
 def test_crash_after_human_wait_is_reconciled_without_rerunning_graph(stores):
     facts, commands, run_id = stores
     commands.accept(run_id, "START", {}, "start-1")

@@ -420,10 +420,21 @@ class WorkflowNodes:
                 include_generation_constraints=run.constraints_version == 1,
             )
             sources = []
-        result = self.runner.executor.invoke(
-            "mission", state.run_id, inputs=pack.inputs,
-            context_contract_version=run.context_contract_version,
+        effect_ref = self.runner.find_effect_artifact(
+            "stage.succeeded:mission:", "mission",
         )
+        if effect_ref is not None:
+            from app.v0.schemas import MissionDraft
+
+            record = self.runner._load_artifact(
+                effect_ref.artifact_id, effect_ref.version,
+            )
+            result = MissionDraft.model_validate(record.content)
+        else:
+            result = self.runner.executor.invoke(
+                "mission", state.run_id, inputs=pack.inputs,
+                context_contract_version=run.context_contract_version,
+            )
         self.runner._write_role_success(
             "mission",
             state.run_id,
@@ -580,23 +591,34 @@ class WorkflowNodes:
             ),
             previous_blueprint_ref=previous_ref if replanning else None,
         )
-        candidate = self.runner.executor.invoke(
-            "blueprint", state.run_id, inputs=pack.inputs,
-            source_runtime=source_runtime, topic=run.course_input.topic,
-            planning_goal=(
-                f"规划恰好 {run.course_input.expected_chapters} 章；遵守已批准 Mission "
-                "与来源边界，不得为凑章伪造内容或来源证据。"
-                if run.planning_loop_version == 1 else None
-            ),
-            context_contract_version=run.context_contract_version,
+        effect_ref = self.runner.find_effect_artifact(
+            "stage.succeeded:blueprint:", "blueprint",
         )
-        if source_runtime is not None and not source_runtime.facts.summary_pack(
-            state.run_id
-        ):
-            return self._source_gate_or_wait(
-                state, index, "blueprint", "source_evidence_insufficient",
+        if effect_ref is not None:
+            from app.v0.schemas import BlueprintDraft
+
+            record = self.runner._load_artifact(
+                effect_ref.artifact_id, effect_ref.version,
             )
-        result = assign_blueprint_ids(candidate)
+            result = BlueprintDraft.model_validate(record.content)
+        else:
+            candidate = self.runner.executor.invoke(
+                "blueprint", state.run_id, inputs=pack.inputs,
+                source_runtime=source_runtime, topic=run.course_input.topic,
+                planning_goal=(
+                    f"规划恰好 {run.course_input.expected_chapters} 章；遵守已批准 Mission "
+                    "与来源边界，不得为凑章伪造内容或来源证据。"
+                    if run.planning_loop_version == 1 else None
+                ),
+                context_contract_version=run.context_contract_version,
+            )
+            if source_runtime is not None and not source_runtime.facts.summary_pack(
+                state.run_id
+            ):
+                return self._source_gate_or_wait(
+                    state, index, "blueprint", "source_evidence_insufficient",
+                )
+            result = assign_blueprint_ids(candidate)
         self.runner._write_role_success(
             "blueprint",
             state.run_id,
@@ -790,6 +812,20 @@ class WorkflowNodes:
                 if existing.run_id != state.run_id or existing.content_hash != existing_ref.content_hash:
                     raise GraphRouteError("已提交 Lesson 引用不匹配")
                 completed.append((LessonDraft.model_validate(existing.content), existing_ref))
+                continue
+            effect_ref = self.runner.find_effect_artifact(
+                f"artifact.created:lesson:{brief.lesson_id}", "lesson",
+            )
+            if effect_ref is not None:
+                from app.v0.schemas import LessonDraft
+
+                existing = self.runner._load_artifact(
+                    effect_ref.artifact_id, effect_ref.version
+                )
+                artifact_refs[f"lesson:{brief.lesson_id}"] = effect_ref
+                completed.append(
+                    (LessonDraft.model_validate(existing.content), effect_ref)
+                )
                 continue
             previous_ref = None
             if lesson_index > 0:

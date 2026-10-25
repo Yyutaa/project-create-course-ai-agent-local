@@ -14,6 +14,10 @@ SERDE = JsonPlusSerializer(
     allowed_msgpack_modules=[
         ("app.v0.schemas", "ArtifactRef"),
         ("app.v0.schemas", "LoopCounts"),
+        # BudgetedProvider runs provider calls through LangGraph `task()`,
+        # whose results are checkpointed and replayed on resume.
+        ("app.v0.provider", "AgentResponse"),
+        ("app.v0.provider", "ToolTurn"),
     ],
 )
 

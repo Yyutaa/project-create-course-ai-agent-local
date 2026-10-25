@@ -83,6 +83,21 @@ class Worker:
             return self.execution.event(run_id, checkpoint["event_id"])
         return None
 
+    def _langgraph_has_pending_task(self, run_id: str) -> bool:
+        """A new-flow Run whose custom checkpoint is gone can still resume
+        from LangGraph's node-boundary checkpoint, as long as it is not
+        parked on an interrupt."""
+        path = getattr(self.runner, "langgraph_checkpoint_path", None)
+        if path is None:
+            return False
+        from app.v0.graph import build_graph
+        from app.v0.langgraph_checkpoint import open_checkpointer, thread_config
+
+        with open_checkpointer(path) as saver:
+            graph = build_graph(self.runner, checkpointer=saver)
+            snapshot = graph.get_state(thread_config(run_id))
+        return bool(snapshot.next) and not snapshot.interrupts
+
     def _mark_stopped(self, run_id: str, epoch: int) -> None:
         run = self.runner.get(run_id)
         if run.status == "stopped":
@@ -350,6 +365,25 @@ class Worker:
             if run.status == "failed":
                 raise RuntimeError("Graph 节点业务失败；不自动重试")
             raise ValueError("START 不允许从业务失败或终态重试")
+        checkpoint = self.execution.last_checkpoint(run_id)
+        if (
+            checkpoint is None
+            and self.runner.get(run_id).langgraph_flow_version == 1
+            and self._langgraph_has_pending_task(run_id)
+        ):
+            try:
+                self.runner.execute(
+                    run_id, state=None, execution=self.execution,
+                    owner=self.owner, epoch=epoch,
+                    command_id=command.id, resume_graph=True,
+                )
+            except StopRequested:
+                self._mark_stopped(run_id, epoch)
+            except TokenLimitReached as error:
+                self._mark_token_stopped(run_id, epoch, error)
+            if self.runner.get(run_id).status == "failed":
+                raise RuntimeError("Graph 节点业务失败；不自动重试")
+            return
         state = self._resume_state(run_id)
         if state is None:
             return
