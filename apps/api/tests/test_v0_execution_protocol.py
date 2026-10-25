@@ -1500,13 +1500,16 @@ def test_waiting_node_execution_can_be_resumed_without_new_attempt(stores):
     )
     commands.finish_node_waiting(
         first.execution_id, waiting_state, "worker-a", epoch,
-        "mission_review_required",
+        "mission_review_required", pending_interrupt_id="interrupt-1",
     )
     with facts.connect() as connection:
-        status = connection.execute(
-            "SELECT status FROM node_executions WHERE id=?", (first.execution_id,),
-        ).fetchone()[0]
+        status, interrupt_id = connection.execute(
+            "SELECT status, pending_interrupt_id FROM node_executions WHERE id=?",
+            (first.execution_id,),
+        ).fetchone()
     assert status == "WAITING"
+    assert interrupt_id == "interrupt-1"
+    assert commands.waiting_interrupt_id(run_id) == "interrupt-1"
 
     commands.expire_for_test(run_id)
     epoch_b = commands.acquire(run_id, "worker-b", ttl_seconds=60)

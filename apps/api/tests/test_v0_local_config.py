@@ -64,7 +64,7 @@ def test_migration_repeatable_and_single_row(config):
     store, _, path = config
     FactStore(path).migrate()
     FactStore(path).migrate()
-    assert FactStore(path).schema_version() == 16
+    assert FactStore(path).schema_version() == 17
     with sqlite3.connect(path) as connection:
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
@@ -321,7 +321,7 @@ def test_v6_metadata_migrates_to_v8_without_losing_ready(config):
     facts = FactStore(path)
     facts.migrate()
     facts.migrate()
-    assert facts.schema_version() == 16
+    assert facts.schema_version() == 17
     assert LocalConfigStore(path, keyring_backend=keyring).require_credentials() == (
         "deepseek-v4-pro", "secret-one"
     )

@@ -1021,7 +1021,7 @@ class ExecutionStore:
 
     def finish_node_waiting(
         self, execution_id: str, state: GraphState, owner: str, epoch: int,
-        reason: str,
+        reason: str, pending_interrupt_id: str | None = None,
     ) -> None:
         with self.facts.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1038,12 +1038,23 @@ class ExecutionStore:
             connection.execute(
                 "UPDATE node_executions SET status='WAITING', "
                 "after_checkpoint_id=?, error=?, lease_epoch=?, "
-                "failure_class=NULL, updated_at=? WHERE id=?",
+                "failure_class=NULL, pending_interrupt_id=?, updated_at=? "
+                "WHERE id=?",
                 (
-                    checkpoint_id, reason[:200], epoch,
+                    checkpoint_id, reason[:200], epoch, pending_interrupt_id,
                     _utc().isoformat(), execution_id,
                 ),
             )
+
+    def waiting_interrupt_id(self, run_id: str) -> str | None:
+        with self.facts.connect() as connection:
+            row = connection.execute(
+                "SELECT pending_interrupt_id FROM node_executions "
+                "WHERE run_id=? AND status='WAITING' "
+                "ORDER BY rowid DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+        return row["pending_interrupt_id"] if row else None
 
     def stop_requested(self, run_id: str) -> bool:
         with self.facts.connect() as connection:

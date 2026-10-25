@@ -333,14 +333,7 @@ class V0Runner:
     def _pending_interrupt_id(self, run_id: str) -> str | None:
         if self._execution is None:
             return None
-        checkpoint = self._execution.last_checkpoint(run_id)
-        if checkpoint is None:
-            return None
-        try:
-            state = GraphState.model_validate_json(checkpoint["state_json"])
-        except Exception:
-            return None
-        return state.pending_interrupt_id
+        return self._execution.waiting_interrupt_id(run_id)
 
     def _handle_interrupt_result(self, result) -> None:
         if self._execution is None or self._execution_attempt is None:
@@ -370,6 +363,7 @@ class V0Runner:
         self._execution.finish_node_waiting(
             self._execution_attempt, waiting_state,
             self._execution_owner, self._execution_epoch, reason,
+            pending_interrupt_id=interrupt_id,
         )
         self._execution_attempt = None
         self._execution_state = None

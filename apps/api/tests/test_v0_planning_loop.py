@@ -53,7 +53,7 @@ def test_new_run_persists_planning_policy_and_migrated_run_defaults_to_legacy(tm
     run, _ = facts.create_run(CourseInput(
         topic="变量", audience="初学者", goal="完成课程", language="zh",
     ), "new-policy")
-    assert facts.schema_version() == 16
+    assert facts.schema_version() == 17
     assert facts.get_run(run.id).planning_loop_version == 1
     with facts.connect() as connection:
         connection.execute("UPDATE runs SET planning_loop_version=0 WHERE id=?", (run.id,))
@@ -73,7 +73,7 @@ def test_v12_migration_defaults_existing_run_to_legacy_and_is_repeatable(tmp_pat
         connection.execute("PRAGMA user_version=12")
     facts.migrate()
     facts.migrate()
-    assert facts.schema_version() == 16
+    assert facts.schema_version() == 17
     assert facts.get_run(run.id).planning_loop_version == 0
 
 

@@ -237,11 +237,12 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 - gate 中断后 NodeExecution 进入 `WAITING`，并写自定义 `after_node` checkpoint；
   恢复通过 `Command(resume={action, feedback})`，不使用 interrupt 期间的
   `update_state()`。
-- 恢复前校验 pending interrupt id 与 NodeExecution `input_hash`；不一致时
-  拒绝恢复，避免旧中断被新输入错误接管。
+- `pending_interrupt_id` 持久在 NodeExecution；恢复前校验 pending interrupt id
+  与 NodeExecution `input_hash`，不依赖自定义 checkpoint state；不一致时拒绝恢复，
+  避免旧中断被新输入错误接管。
 - 只接受 `approve` / `revise`；`revise` 回到 mission 重新生成并再次 interrupt。
 - Quality / Source / Release gate 尚未迁移，仍保留原执行路径。
-- SQLite schema 16：`runs.langgraph_flow_version`。
+- SQLite schema 17：`runs.langgraph_flow_version`、`node_executions.pending_interrupt_id`。
 
 ### 执行协议检查项与待办（2026-10-25）
 
@@ -342,7 +343,7 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 
 ## 课程生成约束
 
-- 现行 SQLite schema 版本为 16，可从 v7 起重复迁移。`intakes` 持久保存
+- 现行 SQLite schema 版本为 17，可从 v7 起重复迁移。`intakes` 持久保存
   `source_policy`、`expected_chapters`、`min_effective_chars`、`token_limit`，`runs` 保存
   `constraints_version`，`publications` 保存已发布课程。迁移前 Run 固定为版本 0，不追溯
   执行新约束；新 Run 固定为版本 1。
