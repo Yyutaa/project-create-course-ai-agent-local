@@ -102,7 +102,7 @@ Run 工作台围绕四个问题组织：
 1. **现在在哪里**：`workflow_steps`、`current_step`、`active_command`、`current_node_execution` 显示阶段、当前节点、Worker 租约与尝试次数。
 2. **系统做过什么**：`events` 显示 Agent、工具、路由、重试、审批与系统事件；`artifacts` 提供可读摘要和可展开原始输出。
 3. **课程质量如何**：`course_quality_snapshot`、批次结果和 `repair_tasks` 分别呈现章节、批次、整课的门禁与证据。
-4. **用户可以做什么**：仅当 `interrupt_payload` 或 Run 状态允许时展示批准、要求修改、重新生成总结、继续失败 Run 或停止按钮。
+4. **用户可以做什么**：仅当 `approval` 或 Run 状态允许时展示批准、要求修改、重新生成总结、继续失败 Run 或停止按钮。
 
 工作台不把 Artifact 当作当前状态。Artifact 是历史证据；Run snapshot、质量快照和 Command projection 才是当前操作依据。
 
@@ -114,12 +114,14 @@ Run 工作台围绕四个问题组织：
 | --- | --- | --- |
 | `Course` | `slug`、`lessons`、`course_quality_snapshot`、`resumable_run_id` | Dashboard、课程页 |
 | `Chapter` | `content`、`content_hash`、`snapshot_path` | 章节编辑器 |
-| `RunDetail` | `status`、`current_step`、`interrupt_payload`、`events`、`artifacts`、`repair_tasks` | Run 工作台 |
+| `RunDetail` | `status`、`current_step`、`approval`、`events`、`artifacts`、`repair_tasks` | Run 工作台 |
 | `CommandExecution` | `kind`、`status`、租约、心跳、尝试次数 | 执行面板 |
 | `NodeExecution` | `node_id`、`input_hash`、状态、错误 | 节点执行时间线 |
 | `CourseQualitySnapshot` | 各章字符数、Humanizer、语义结论、构建/校验结果 | 质量矩阵、课程文章 |
 | `BudgetSnapshot` / `TraceProjection` | Token、限制、Span、耗时、错误 | 可观测性面板 |
 | `WorkflowSnapshot` | 主图/Review 图的节点、边、Agent、Tool | Workflow 页面与可视化 |
+
+`RunDetail.approval` 来源于后端 `ExecutionReadModel.approval`，是四类人工 Gate 的统一决策读模型；旧 `mission_review` / `quality_review` / `source_review` 字段仅作兼容回退，前端优先读取 `approval`。审批面板只按 `approval.actions` 渲染动作，并用 `canDecideApproval` 校验动作、`checkpoint_id` 与当前 checkpoint 及未完成的 Command；当 `approval` 缺失时通过 legacy adapter（含 `legacySourceApproval`）从旧字段构造展示模型。Mission / Quality / Source 的 `stop` 调用 `POST /stop`，Release 的 `stop` 作为人工决定调用 `POST /release`；Source 面板在 `actions` 含 `stop` 时同样提供停止入口。`retry_search` 仅在 `retry_remaining > 0` 时出现。
 
 TanStack Query 的 query key 按资源粒度组织，例如 `courses`、`course/:slug`、`run/:id`、`budget/:id`、`trace/:id`。写操作成功后应失效课程或 Run 的相关 key，而不是手工伪造最终状态。局部 UI 状态使用 React state：创建表单、当前 Tab、展开的 Artifact、编辑器草稿和质量筛选。
 

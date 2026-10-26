@@ -366,6 +366,18 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
   STOP 在受理后阻止下一节点；崩溃接管复用已提交 Artifact。release 仍独立由人决定，
   本门禁不增加自动发布或业务失败重试能力，遵循本节契约。
 
+## 审批 Payload 契约
+
+- 四类人工 Gate 使用统一 `ApprovalPayload`：`type`、`step`、`title`、`output`、`actions`、`guidance`，以及不透明绑定 ID `checkpoint_id`。
+- `output` 只包含当前产物摘要 `summary`、关键指标 `metrics`、精确 `refs` 和来源候选 `candidates`。
+- `actions` 由服务端按确定性事实派生：Mission 为 `approve/revise/stop`；Quality 为 `retry/accept/stop`（`accept` 是接受风险，不是质量通过），技术失败态 `retry_only` 只有 `retry`；Source 为 `approve/reject/propose_url/stop`，且仅在 `retry_remaining > 0` 时追加 `retry_search`；Release 为 `prepare/stop`。
+- Quality 返工耗尽或 `manual_review` 时不得出现 `approve`；接受风险必须带人工说明。
+- Payload 不得包含 checkpoint 内容、`state_json`、`waiting_state_json`、`after_state_json`、`payload_json`、`api_key`、`Authorization`、`raw`、`prompt`、完整 `markdown`、API Key 或模型原始响应。
+- `approval_action` 只能来自用户提交或确定性检查结果，模型输出不得写入。
+- `actions` 是 UI 级允许动作集合，不等于 resume 枚举：Mission / Quality / Source 的 `stop` 由 `POST /stop` 执行；Release 的 `stop` 走 `POST /release` 的人工决定（v1 会以 `{"action": "stop", ...}` 恢复 `release_gate`）。Source 的 `reject` / `propose_url` 由 `SOURCE_REVIEW` 执行且不恢复 Graph；只有 Gate 自身的 `approve` / `revise` / `retry` / `accept` / `retry_search` / `prepare` 会作为 `Command(resume=...)` 写回。
+- Gate 的 `interrupt()` payload 中 `checkpoint_id` 恒为 `None`；真实绑定 ID 只由 `ExecutionReadModel.approval` 提供。旧 `mission_review` / `quality_review` / `source_review` 中的引用是当前 Command 所需的最新元数据，而非仅兼容字段。
+- 跨版本恢复：旧在途 checkpoint 的 `state_json` / `waiting_state_json` 可能没有 `approval_action`，这是安全的；恢复时 LangGraph 会重新执行 Gate 节点，重新写入 `approval_action` 并按预期路由，不需要手工迁移。
+
 ## 本地 DeepSeek 配置存储
 
 - 本地配置存储引入时的 SQLite schema 版本为 7；从 v6 可重复迁移，单行元数据仅保存固定 provider、

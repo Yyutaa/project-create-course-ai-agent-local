@@ -129,6 +129,10 @@ apps/api/app/
 
 所有长任务操作返回排队信息；审批只有在 Run 为 `WAITING_APPROVAL` 时可执行。发布批准还要求已有 release review，避免空摘要被误发布。
 
+现行 V0 的执行读模型 `ExecutionReadModel` 中，`approval` 是四类人工 Gate（Mission / Quality / Source / Release）的统一决策读模型：只含当前产物摘要、关键指标、精确 `refs`、来源候选、允许动作和不透明 `checkpoint_id`，不包含 checkpoint 内容、`state_json`、`waiting_state_json`、`after_state_json`、`payload_json`、`api_key`、`Authorization`、`raw`、`prompt`、完整 `markdown`、API Key 或模型原始响应。旧 `mission_review` / `quality_review` / `source_review` 字段仅作兼容回退，前端优先读取 `approval`；其中的引用仍作为当前 Command 的最新元数据使用。
+
+`actions` 由服务端按确定性事实派生：Source 仅在 `retry_remaining > 0` 时包含 `retry_search`。Mission / Quality / Source 的 `stop` 由 `POST /stop` 执行；Release 的 `stop` 是 `POST /release` 的人工决定，v1 会以 `{"action": "stop", ...}` 恢复 `release_gate`。Gate 的 `interrupt()` payload 中 `checkpoint_id` 恒为 `None`，真实绑定 ID 只由读模型提供。跨版本恢复时，旧在途 checkpoint 的 `state_json` / `waiting_state_json` 可能缺少 `approval_action`；恢复会重新执行 Gate 并写入该字段，因此无需迁移旧 checkpoint。
+
 ## 5. 数据库设计
 
 `.course-agent/agent.db` 使用 SQLite。表分为业务记录、执行记录和观测记录：
