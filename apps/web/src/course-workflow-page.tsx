@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, ApiError, CourseInput, LlmConfigStatus, StageRecord } from "./api";
+import {
+  api, ApiError, ApprovalAction, ApprovalPayload, CourseInput, LlmConfigStatus, StageRecord,
+} from "./api";
 import { clearPendingKey, pendingKey } from "./idempotency";
 import {
   budgetTokenLabel,
-  canResumeRun, canStartRun, canDecideRelease, canPublish,
+  canDecideApproval, canResumeRun, canStartRun, canDecideRelease, canPublish,
   canReviewMission, canReviewQuality, courseContentHeading, courseCreationAction,
-  continuityLedgerLabels, pollInterval, runningPollInterval,
+  continuityLedgerLabels, legacyMissionApproval, legacyQualityApproval,
+  legacyReleaseApproval, legacySourceApproval, pollInterval, runningPollInterval,
   runPath, shouldPoll, sourceReviewSummary, stageDisplayName,
 } from "./run-view";
 import { subscribeRun } from "./run-stream";
@@ -27,6 +30,17 @@ export function NewCoursePage() {
 export function RunPage() {
   const { id } = useParams();
   return <CourseWorkflowPage runId={id} />;
+}
+
+
+function ApprovalMetrics({ metrics }: { metrics: ApprovalPayload["output"]["metrics"] }) {
+  return (
+    <dl className="approval-metrics">
+      {Object.entries(metrics).map(([key, value]) => (
+        <div key={key}><dt>{key}</dt><dd>{String(value)}</dd></div>
+      ))}
+    </dl>
+  );
 }
 
 
@@ -161,7 +175,14 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
   const releaseMutation = useMutation({
     mutationFn: ({ id, action, reason, key }: {
       id: string; action: "prepare" | "stop"; reason: string; key: string;
-    }) => api.decideRelease(id, action, reason, key),
+    }) => {
+      const execution = executionQuery.data;
+      const canDecide = execution?.approval
+        ? Boolean(run && canDecideApproval(run, execution, action))
+        : Boolean(run && canDecideRelease(run));
+      if (!canDecide) throw new Error("Release 状态已变化，请刷新后重试");
+      return api.decideRelease(id, action, reason, key);
+    },
     onSuccess: (decided) => {
       clearPendingKey(sessionStorage, `release:${decided.id}`);
       queryClient.setQueryData(["run", decided.id], decided);
@@ -229,7 +250,13 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
     mutationFn: async (action: "approve" | "revise") => {
       const review = executionQuery.data?.mission_review;
       const checkpoint = executionQuery.data?.checkpoint?.id;
-      if (!runId || !run || !canReviewMission(run, executionQuery.data) || !review || !checkpoint) {
+      if (!runId || !run || !review || !checkpoint) {
+        throw new Error("Mission 审批状态已变化，请刷新后重试");
+      }
+      const canDecide = executionQuery.data?.approval
+        ? canDecideApproval(run, executionQuery.data, action)
+        : canReviewMission(run, executionQuery.data);
+      if (!canDecide) {
         throw new Error("Mission 审批状态已变化，请刷新后重试");
       }
       const feedback = action === "revise" ? missionFeedback.trim() : undefined;
@@ -256,11 +283,17 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
   const qualityReviewMutation = useMutation({
     mutationFn: async (action: "retry" | "accept") => {
       const review = executionQuery.data?.quality_review;
-      if (!runId || !run || !canReviewQuality(run, executionQuery.data) || !review) {
+      if (!runId || !run || !review) {
         throw new Error("Quality 人工处理状态已变化，请刷新后重试");
       }
       if (action === "accept" && review.status === "retry_only") {
         throw new Error("Reviewer 输出格式失败只能重新检查，不能接受为质量通过");
+      }
+      const canDecide = executionQuery.data?.approval
+        ? canDecideApproval(run, executionQuery.data, action)
+        : canReviewQuality(run, executionQuery.data);
+      if (!canDecide) {
+        throw new Error("Quality 人工处理状态已变化，请刷新后重试");
       }
       const acceptedReason = action === "accept" ? qualityReason.trim() : undefined;
       if (action === "accept" && !acceptedReason) throw new Error("请填写风险接受说明");
@@ -297,8 +330,24 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
       action: "approve" | "reject" | "propose_url" | "retry_search";
       candidateId?: string; metadataHash?: string;
     }) => {
-      const review = executionQuery.data?.source_review;
-      if (!runId || !review || review.checkpoint_id !== executionQuery.data?.checkpoint?.id) {
+      const execution = executionQuery.data;
+      const review = execution?.source_review;
+      const sourcePayload = execution?.approval?.type === "SOURCE_APPROVAL"
+        ? execution.approval : null;
+      const checkpoint = sourcePayload
+        ? sourcePayload.checkpoint_id
+        : review?.checkpoint_id ?? null;
+      const legacyAllowed = Boolean(
+        run && review && checkpoint === execution?.checkpoint?.id
+          && run.status === "waiting_for_human"
+          && !execution?.commands.some((command) =>
+            command.kind === "SOURCE_REVIEW"
+            && (command.status === "ACCEPTED" || command.status === "CLAIMED")),
+      );
+      const canDecide = sourcePayload
+        ? Boolean(run && canDecideApproval(run, execution, action))
+        : legacyAllowed;
+      if (!runId || !run || !checkpoint || !canDecide) {
         throw new Error("来源复核状态已变化，请刷新后重试");
       }
       const reason = sourceReason.trim();
@@ -306,7 +355,7 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
       const url = action === "propose_url" ? sourceUrl.trim() : undefined;
       if (action === "propose_url" && !url) throw new Error("请填写公开官方资料地址");
       const payload = {
-        action, expected_checkpoint_id: review.checkpoint_id,
+        action, expected_checkpoint_id: checkpoint,
         ...(action === "approve" ? { reason } : {}),
         ...(url ? { url } : {}),
         ...(candidateId ? { candidate_id: candidateId, metadata_hash: metadataHash } : {}),
@@ -334,6 +383,54 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
   const sourceReviewCompatible = Boolean(executionQuery.data?.source_review
     && Number.isInteger(executionQuery.data.source_review.hidden_candidate_count)
     && Number.isInteger(executionQuery.data.source_review.retry_remaining));
+  const approval = executionQuery.data?.approval;
+  const missionApproval = approval?.type === "MISSION_APPROVAL"
+    ? approval
+    : (!approval && run && canReviewMission(run, executionQuery.data)
+        && executionQuery.data?.mission_review
+        ? legacyMissionApproval(executionQuery.data.mission_review)
+        : null);
+  const qualityApproval = approval?.type === "QUALITY_APPROVAL"
+    ? approval
+    : (!approval && run && canReviewQuality(run, executionQuery.data)
+        && executionQuery.data?.quality_review
+        ? legacyQualityApproval(executionQuery.data.quality_review)
+        : null);
+  const releaseApproval = approval?.type === "RELEASE_APPROVAL"
+    ? approval
+    : (!approval && run && canDecideRelease(run)
+        ? legacyReleaseApproval(executionQuery.data)
+        : null);
+  const sourceReview = executionQuery.data?.source_review;
+  const sourceApproval = approval?.type === "SOURCE_APPROVAL"
+    ? approval
+    : (sourceReview && sourceReviewCompatible ? legacySourceApproval(sourceReview) : null);
+  const sourceCandidates = sourceApproval?.output.candidates ?? [];
+  const sourceRetryRemaining = Number(sourceApproval?.output.metrics.retry_remaining ?? 0);
+  const sourceRetryAvailable = sourceApproval?.actions.includes("retry_search") ?? false;
+  const sourceApproveAvailable = sourceApproval?.actions.includes("approve") ?? false;
+  const sourceRejectAvailable = sourceApproval?.actions.includes("reject") ?? false;
+  const sourceProposeAvailable = sourceApproval?.actions.includes("propose_url") ?? false;
+  const sourceStopAvailable = sourceApproval?.actions.includes("stop") ?? false;
+  const approvalAllowed = (action: ApprovalAction, legacy: () => boolean) =>
+    approval
+      ? Boolean(run && canDecideApproval(run, executionQuery.data, action))
+      : legacy();
+  const missionAllowed = (action: "approve" | "revise" | "stop") =>
+    approvalAllowed(action, () => Boolean(run && canReviewMission(run, executionQuery.data)));
+  const qualityAllowed = (action: "retry" | "accept" | "stop") =>
+    approvalAllowed(action, () => Boolean(run && canReviewQuality(run, executionQuery.data)));
+  const releaseAllowed = (action: "prepare" | "stop") =>
+    approvalAllowed(action, () => Boolean(run && canDecideRelease(run)));
+  const sourceAllowed = (action: ApprovalAction) =>
+    approvalAllowed(action, () => Boolean(
+      run && sourceReview && sourceReviewCompatible
+        && sourceReview.checkpoint_id === executionQuery.data?.checkpoint?.id
+        && run.status === "waiting_for_human"
+        && !executionQuery.data?.commands.some((command) =>
+          command.kind === "SOURCE_REVIEW"
+          && (command.status === "ACCEPTED" || command.status === "CLAIMED")),
+    ));
   const chapterDeviation = run?.stages.some(
     (stage) => stage.failure_reason === "blueprint_chapter_deviation",
   ) ?? false;
@@ -484,52 +581,70 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
                       </article>
                     ))}
                   </details>}
-          {displayedStage?.name === "mission" && canReviewMission(run, executionQuery.data) &&
+          {displayedStage?.name === "mission" && missionApproval && (
             <section className="result-card">
-              <p>请先确认任务定义，或提出具体修改意见。确认后才会进入 Blueprint。</p>
+              <h2>{missionApproval.title}</h2>
+              <p>{missionApproval.guidance}</p>
+              <p>{missionApproval.output.summary}</p>
+              <ApprovalMetrics metrics={missionApproval.output.metrics} />
               <label>修改意见
                 <textarea value={missionFeedback} maxLength={2000}
                   onChange={(event) => setMissionFeedback(event.target.value)} />
               </label>
               <div className="release-actions">
-                <button disabled={busy} onClick={() => missionReviewMutation.mutate("approve")}>确认任务定义</button>
-                <button disabled={busy || !missionFeedback.trim()} onClick={() => missionReviewMutation.mutate("revise")}>要求修改</button>
+                {missionApproval.actions.includes("approve") &&
+                  <button disabled={busy || !missionAllowed("approve")}
+                    onClick={() => missionReviewMutation.mutate("approve")}>确认任务定义</button>}
+                {missionApproval.actions.includes("revise") &&
+                  <button disabled={busy || !missionFeedback.trim() || !missionAllowed("revise")}
+                    onClick={() => missionReviewMutation.mutate("revise")}>要求修改</button>}
+                {missionApproval.actions.includes("stop") &&
+                  <button disabled={busy || !missionAllowed("stop")}
+                    onClick={() => controlMutation.mutate("STOP")}>停止 Run</button>}
               </div>
-            </section>}
-          {executionQuery.data?.source_review && !sourceReviewCompatible &&
+            </section>
+          )}
+          {sourceReview && !sourceApproval && !sourceReviewCompatible &&
             <section className="result-card" aria-label="来源人工复核">
               <h2>来源复核暂不可用</h2>
-              <p role="alert">{sourceReviewSummary(executionQuery.data.source_review)}</p>
+              <p role="alert">{sourceReviewSummary(sourceReview)}</p>
             </section>}
-          {sourceReviewCompatible && executionQuery.data?.source_review && <section className="result-card source-review-panel" aria-label="来源人工复核">
+          {sourceApproval &&
+            <section className="result-card source-review-panel" aria-label="来源人工复核">
             <div className="source-review-heading">
               <div>
                 <span className="source-review-eyebrow">来源核验暂停</span>
-                <h2>先让系统继续查找</h2>
-                <p>目前没有足够的官方资料支撑课程。你无需逐条审核搜索结果。</p>
+                <h2>{sourceApproval.title}</h2>
+                <p>{sourceApproval.guidance}</p>
               </div>
               <span className="source-review-state">证据不足</span>
             </div>
             <p className="source-review-summary" role="status">
-              {sourceReviewSummary(executionQuery.data.source_review)}
+              {sourceApproval.output.summary}
               {(sourcesQuery.data?.documents.length ?? 0) > 0 &&
                 `；已有 ${sourcesQuery.data?.documents.length} 份来源文档`}
             </p>
             {sourcesQuery.isError && <p role="alert">来源记录读取失败，请刷新后重试。</p>}
-            {executionQuery.data.source_review.retry_remaining > 0 ?
+            {sourceRetryAvailable ?
               <div className="source-review-primary">
-                <button className="primary-action" disabled={busy}
+                <button className="primary-action"
+                  disabled={busy || !sourceAllowed("retry_search")}
                   onClick={() => sourceReviewMutation.mutate({ action: "retry_search" })}>
                   继续自动查找官方资料
                 </button>
-                <span>本 Run 还可重试 {executionQuery.data.source_review.retry_remaining} 次；仍受模型与工具预算约束。</span>
+                <span>本 Run 还可重试 {sourceRetryRemaining} 次；仍受模型与工具预算约束。</span>
               </div>
               : <p className="source-review-limit">自动查找次数已用尽。若你知道官方文档地址，可在下方补充；否则保持暂停。</p>}
-            {executionQuery.data.source_review.candidates.length > 0 && <div className="source-review-candidates">
+            {sourceStopAvailable &&
+              <div className="source-review-primary">
+                <button disabled={busy || !sourceAllowed("stop")}
+                  onClick={() => controlMutation.mutate("STOP")}>停止 Run</button>
+              </div>}
+            {sourceCandidates.length > 0 && <div className="source-review-candidates">
               <h3>仍需你判断的来源</h3>
               <p>只确认网站的官方归属；课程中的具体事实会另行核验。</p>
               <div className="source-candidate-list">
-                {executionQuery.data.source_review.candidates.map((candidate) =>
+                {sourceCandidates.map((candidate) =>
                   <article className="source-candidate" key={candidate.id}>
                     <div className="source-candidate-copy">
                       <span className="source-candidate-host">{new URL(candidate.url).hostname}</span>
@@ -538,18 +653,22 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
                       </a>
                     </div>
                     <div className="source-candidate-actions">
-                      <button className="secondary" disabled={busy}
-                        onClick={() => {
-                          setSourceDecision({ action: "approve", id: candidate.id,
-                            metadataHash: candidate.metadata_hash, url: candidate.url });
-                          sourceDecisionDialog.current?.showModal();
-                        }}>核对并确认</button>
-                      <button className="source-reject-button" disabled={busy}
-                        onClick={() => {
-                          setSourceDecision({ action: "reject", id: candidate.id,
-                            metadataHash: candidate.metadata_hash, url: candidate.url });
-                          sourceDecisionDialog.current?.showModal();
-                        }}>排除</button>
+                      {sourceApproveAvailable &&
+                        <button className="secondary"
+                          disabled={busy || !sourceAllowed("approve")}
+                          onClick={() => {
+                            setSourceDecision({ action: "approve", id: candidate.id,
+                              metadataHash: candidate.metadata_hash, url: candidate.url });
+                            sourceDecisionDialog.current?.showModal();
+                          }}>核对并确认</button>}
+                      {sourceRejectAvailable &&
+                        <button className="source-reject-button"
+                          disabled={busy || !sourceAllowed("reject")}
+                          onClick={() => {
+                            setSourceDecision({ action: "reject", id: candidate.id,
+                              metadataHash: candidate.metadata_hash, url: candidate.url });
+                            sourceDecisionDialog.current?.showModal();
+                          }}>排除</button>}
                     </div>
                   </article>) }
               </div>
@@ -561,8 +680,10 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
                 <input type="url" value={sourceUrl} placeholder="https://官方文档站点/…"
                   onChange={(event) => setSourceUrl(event.target.value)} />
               </label>
-              <button className="secondary" disabled={busy || !sourceUrl.trim()}
-                onClick={() => sourceReviewMutation.mutate({ action: "propose_url" })}>添加候选地址</button>
+              {sourceProposeAvailable &&
+                <button className="secondary"
+                  disabled={busy || !sourceUrl.trim() || !sourceAllowed("propose_url")}
+                  onClick={() => sourceReviewMutation.mutate({ action: "propose_url" })}>添加候选地址</button>}
             </details>
             {(sourcesQuery.data?.candidates.length ?? 0) > 0 &&
               <details className="source-review-extra source-review-diagnostics">
@@ -592,8 +713,9 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
               </label>}
               <div className="release-actions">
                 <button onClick={() => sourceDecisionDialog.current?.close()}>取消</button>
-                <button disabled={busy || !sourceDecision ||
-                  (sourceDecision.action === "approve" && !sourceReason.trim())} onClick={() => {
+                <button disabled={busy || !sourceDecision
+                  || !sourceAllowed(sourceDecision.action)
+                  || (sourceDecision.action === "approve" && !sourceReason.trim())} onClick={() => {
                   if (!sourceDecision) return;
                   sourceReviewMutation.mutate({
                     action: sourceDecision.action, candidateId: sourceDecision.id,
@@ -610,34 +732,46 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
               <ul>{continuityLedgerLabels(run.batch_plan).map((label) =>
                 <li key={label}>{label}</li>)}</ul>
             </section>}
-          {displayedStage?.name === "quality" && canReviewQuality(run, executionQuery.data)
-            && executionQuery.data?.quality_review && <section className="result-card quality-review-panel">
-              <h2>Quality 人工处理</h2>
-              {executionQuery.data.quality_review.status === "retry_only"
-                ? <p>Reviewer 输出格式校验失败。可显式重新检查当前章节；此前人工接受的风险不会被撤销。</p>
-                : <p>当前证据：quality v{executionQuery.data.quality_review.quality_ref?.version}；
-                    Lesson v{executionQuery.data.quality_review.lesson_ref.version}。</p>}
-              <button disabled={busy} onClick={() => qualityReviewMutation.mutate("retry")}>
-                重新检查
-              </button>
-              {executionQuery.data.quality_review.status === "pending" && <>
+          {displayedStage?.name === "quality" && qualityApproval && (
+            <section className="result-card quality-review-panel">
+              <h2>{qualityApproval.title}</h2>
+              <p>{qualityApproval.guidance}</p>
+              <p>{qualityApproval.output.summary}</p>
+              <ApprovalMetrics metrics={qualityApproval.output.metrics} />
+              {qualityApproval.actions.includes("retry") &&
+                <button disabled={busy || !qualityAllowed("retry")}
+                  onClick={() => qualityReviewMutation.mutate("retry")}>
+                  重新检查
+                </button>}
+              {qualityApproval.actions.includes("accept") && <>
                 <label>风险接受说明
-                  <textarea value={qualityReason} onChange={(event) => setQualityReason(event.target.value)} />
+                  <textarea value={qualityReason}
+                    onChange={(event) => setQualityReason(event.target.value)} />
                 </label>
-                <button disabled={busy || !qualityReason.trim()}
+                <button disabled={busy || !qualityReason.trim() || !qualityAllowed("accept")}
                   onClick={() => qualityReviewMutation.mutate("accept")}>接受风险并继续</button>
               </>}
-            </section>}
-          {displayedStage?.name === "release" && canDecideRelease(run) && (
+              {qualityApproval.actions.includes("stop") &&
+                <button disabled={busy || !qualityAllowed("stop")}
+                  onClick={() => controlMutation.mutate("STOP")}>停止 Run</button>}
+            </section>
+          )}
+          {displayedStage?.name === "release" && releaseApproval && (
             <section className="release-panel" id="release-actions">
-              <h2>人工 release 决定</h2>
-              <p>“准备发布”只记录人工意向，不会自动发布课程。</p>
+              <h2>{releaseApproval.title}</h2>
+              <p>{releaseApproval.guidance}</p>
+              <p>{releaseApproval.output.summary}</p>
               <label>决定理由
-                <textarea required value={reason} onChange={(event) => setReason(event.target.value)} />
+                <textarea required value={reason}
+                  onChange={(event) => setReason(event.target.value)} />
               </label>
               <div className="release-actions">
-                <button disabled={busy || !reason.trim()} onClick={() => decide("prepare")}>准备发布</button>
-                <button disabled={busy || !reason.trim()} onClick={() => decide("stop")}>停止</button>
+                {releaseApproval.actions.includes("prepare") &&
+                  <button disabled={busy || !reason.trim() || !releaseAllowed("prepare")}
+                    onClick={() => decide("prepare")}>准备发布</button>}
+                {releaseApproval.actions.includes("stop") &&
+                  <button disabled={busy || !reason.trim() || !releaseAllowed("stop")}
+                    onClick={() => decide("stop")}>停止</button>}
               </div>
             </section>
           )}

@@ -1,4 +1,4 @@
-import type { ArtifactSummary, BatchPlan, CourseInput, CourseProgress, ExecutionReadModel, Finding, GateResult, LlmConfigStatus, ReviewFinding, V0Run } from "./api";
+import type { ApprovalPayload, ArtifactSummary, BatchPlan, CourseInput, CourseProgress, ExecutionReadModel, Finding, GateResult, LlmConfigStatus, ReviewFinding, V0Run } from "./api";
 
 const STAGES = ["intake", "mission", "blueprint", "batch_plan", "generation", "quality", "release"];
 const STAGE_NAMES = [
@@ -186,14 +186,106 @@ export function canDecideRelease(run: Pick<V0Run, "status" | "stages">): boolean
     && run.stages.find((stage) => stage.name === "release")?.status === "waiting_for_human";
 }
 
+export function canDecideApproval(
+  run: Pick<V0Run, "status">,
+  execution: Pick<ExecutionReadModel, "checkpoint" | "commands" | "approval">
+    | null | undefined,
+  action: string,
+): boolean {
+  const approval = execution?.approval;
+  if (!execution || !approval
+    || !(approval.actions as readonly string[]).includes(action)) return false;
+  if (approval.checkpoint_id !== execution.checkpoint?.id) return false;
+  if (execution.commands.some((command) =>
+    command.status === "ACCEPTED" || command.status === "CLAIMED")) return false;
+  if (run.status === "waiting_for_human") return true;
+  // Reviewer 结构校验失败的技术重试停留在 failed 状态；只允许 retry。
+  return run.status === "failed" && action === "retry";
+}
+
+export function legacyMissionApproval(
+  review: Pick<NonNullable<ExecutionReadModel["mission_review"]>, "checkpoint_id">,
+): ApprovalPayload {
+  return {
+    type: "MISSION_APPROVAL",
+    step: "mission",
+    title: "确认课程任务定义",
+    output: { summary: "", metrics: {}, refs: [], candidates: [] },
+    actions: ["approve", "revise"],
+    guidance: "请先确认任务定义，或提出具体修改意见。确认后才会进入 Blueprint。",
+    checkpoint_id: review.checkpoint_id,
+  };
+}
+
+export function legacyQualityApproval(
+  review: Pick<NonNullable<ExecutionReadModel["quality_review"]>, "checkpoint_id" | "status">,
+): ApprovalPayload {
+  const retryOnly = review.status === "retry_only";
+  return {
+    type: "QUALITY_APPROVAL",
+    step: "quality",
+    title: "Quality 人工处理",
+    output: { summary: "", metrics: {}, refs: [], candidates: [] },
+    actions: retryOnly ? ["retry"] : ["retry", "accept"],
+    guidance: retryOnly
+      ? "Reviewer 输出格式校验失败。可显式重新检查当前章节；此前人工接受的风险不会被撤销。"
+      : "核对质量结论与证据；接受风险必须填写说明，且不等同于质量通过。",
+    checkpoint_id: review.checkpoint_id,
+  };
+}
+
+export function legacySourceApproval(
+  review: Pick<NonNullable<ExecutionReadModel["source_review"]>,
+    "checkpoint_id" | "candidates" | "hidden_candidate_count" | "retry_remaining">,
+): ApprovalPayload {
+  const actions: ApprovalPayload["actions"] = ["approve", "reject", "propose_url", "stop"];
+  if (review.retry_remaining > 0) actions.splice(3, 0, "retry_search");
+  return {
+    type: "SOURCE_APPROVAL",
+    step: "blueprint",
+    title: "补充或确认官方来源",
+    output: {
+      summary: sourceReviewSummary(review),
+      metrics: {
+        candidate_count: review.candidates.length,
+        hidden_candidate_count: review.hidden_candidate_count,
+        retry_remaining: review.retry_remaining,
+      },
+      refs: [],
+      candidates: review.candidates.map((candidate) => ({ ...candidate })),
+    },
+    actions,
+    guidance: "只确认网站的官方归属；课程中的具体事实会另行核验。",
+    checkpoint_id: review.checkpoint_id,
+  };
+}
+
+export function legacyReleaseApproval(
+  execution: Pick<ExecutionReadModel, "checkpoint"> | null | undefined,
+): ApprovalPayload {
+  return {
+    type: "RELEASE_APPROVAL",
+    step: "release",
+    title: "人工 release 决定",
+    output: { summary: "", metrics: {}, refs: [], candidates: [] },
+    actions: ["prepare", "stop"],
+    guidance: "“准备发布”只记录人工意向，不会自动发布课程。",
+    checkpoint_id: execution?.checkpoint?.id ?? null,
+  };
+}
+
 export function canPublish(run: Pick<V0Run, "status">): boolean {
   return run.status === "ready_for_release";
 }
 
 export function canReviewMission(
   run: Pick<V0Run, "status" | "stages">,
-  execution: Pick<ExecutionReadModel, "checkpoint" | "commands" | "mission_review"> | null | undefined,
+  execution: Pick<ExecutionReadModel, "checkpoint" | "commands" | "mission_review" | "approval">
+    | null | undefined,
 ): boolean {
+  if (execution?.approval) {
+    return canDecideApproval(run, execution, "approve");
+  }
   return run.status === "waiting_for_human"
     && run.stages.find((stage) => stage.name === "mission")?.status === "waiting_for_human"
     && execution?.mission_review?.status === "pending"
@@ -205,8 +297,12 @@ export function canReviewMission(
 
 export function canReviewQuality(
   run: Pick<V0Run, "status" | "stages">,
-  execution: Pick<ExecutionReadModel, "checkpoint" | "commands" | "quality_review"> | null | undefined,
+  execution: Pick<ExecutionReadModel, "checkpoint" | "commands" | "quality_review" | "approval">
+    | null | undefined,
 ): boolean {
+  if (execution?.approval) {
+    return canDecideApproval(run, execution, "retry");
+  }
   const status = execution?.quality_review?.status;
   const manual = run.status === "waiting_for_human"
     && run.stages.find((stage) => stage.name === "quality")?.status === "waiting_for_human"

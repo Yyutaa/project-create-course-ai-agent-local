@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   artifactHandoffLabel,
   batchProgressLabel,
+  canDecideApproval,
   canStartRun,
   courseCreationAction,
   canDecideRelease,
@@ -14,6 +15,9 @@ import {
   continuityLedgerLabels,
   budgetTokenLabel,
   generationConstraintLabels,
+  legacyMissionApproval,
+  legacyQualityApproval,
+  legacyReleaseApproval,
   preferNewerRun,
   reviewFindingLabel,
   qualityGateLabels,
@@ -719,4 +723,117 @@ test("legacy batch plans without graph metadata remain readable", () => {
 
   assert.equal(batchProgressLabel(legacy), "1 个批次，已完成 0 个");
   assert.deepEqual(continuityLedgerLabels(legacy), []);
+});
+
+test("approval payload actions drive gate decisions", () => {
+  const run = {
+    status: "waiting_for_human",
+    stages: [{ name: "mission", status: "waiting_for_human" }],
+  };
+  const execution = {
+    checkpoint: { id: "cp-1" },
+    commands: [],
+    approval: {
+      type: "MISSION_APPROVAL",
+      step: "mission",
+      title: "确认课程任务定义",
+      output: {
+        summary: "初学者：解释变量",
+        metrics: { stop_conditions: 2 },
+        refs: [],
+        candidates: [],
+      },
+      actions: ["approve", "revise", "stop"],
+      guidance: "确认后进入 Blueprint。",
+      checkpoint_id: "cp-1",
+    },
+  };
+
+  assert.equal(canDecideApproval(run, execution, "approve"), true);
+  assert.equal(canDecideApproval(run, execution, "prepare"), false);
+  assert.equal(canDecideApproval(run, {
+    ...execution,
+    approval: { ...execution.approval, actions: ["revise", "stop"] },
+  }, "approve"), false);
+  assert.equal(canDecideApproval(run, {
+    ...execution,
+    checkpoint: { id: "stale" },
+  }, "approve"), false);
+  assert.equal(canDecideApproval(run, {
+    ...execution,
+    commands: [{ kind: "MISSION_REVIEW", status: "ACCEPTED" }],
+  }, "approve"), false);
+});
+
+test("failed reviewer retry is the only approval decision", () => {
+  const execution = {
+    checkpoint: { id: "cp-failed" },
+    commands: [],
+    approval: {
+      type: "QUALITY_APPROVAL", step: "quality", title: "重新检查当前章节",
+      output: { summary: "", metrics: { status: "retry_only" }, refs: [], candidates: [] },
+      actions: ["retry"], guidance: "", checkpoint_id: "cp-failed",
+    },
+  };
+
+  assert.equal(canDecideApproval({ status: "failed" }, execution, "retry"), true);
+  assert.equal(canDecideApproval({ status: "failed" }, execution, "accept"), false);
+  assert.equal(canDecideApproval({ status: "failed" }, {
+    ...execution,
+    approval: { ...execution.approval, actions: ["retry", "accept"] },
+  }, "accept"), false);
+  assert.equal(canDecideApproval({ status: "waiting_for_human" }, execution, "retry"), true);
+});
+
+test("legacy review fields synthesize approval fallbacks", () => {
+  const mission = legacyMissionApproval({ checkpoint_id: "cp-1" });
+  assert.equal(mission.type, "MISSION_APPROVAL");
+  assert.equal(mission.step, "mission");
+  assert.equal(mission.title, "确认课程任务定义");
+  assert.deepEqual(mission.output, { summary: "", metrics: {}, refs: [], candidates: [] });
+  assert.deepEqual(mission.actions, ["approve", "revise"]);
+  assert.equal(mission.checkpoint_id, "cp-1");
+
+  const quality = legacyQualityApproval({ status: "pending", checkpoint_id: "cp-q" });
+  assert.equal(quality.type, "QUALITY_APPROVAL");
+  assert.equal(quality.step, "quality");
+  assert.deepEqual(quality.actions, ["retry", "accept"]);
+  assert.equal(quality.checkpoint_id, "cp-q");
+
+  const retryOnly = legacyQualityApproval({ status: "retry_only", checkpoint_id: "cp-r" });
+  assert.deepEqual(retryOnly.actions, ["retry"]);
+
+  const release = legacyReleaseApproval({ checkpoint: { id: "cp-rel" } });
+  assert.equal(release.type, "RELEASE_APPROVAL");
+  assert.equal(release.step, "release");
+  assert.deepEqual(release.actions, ["prepare", "stop"]);
+  assert.equal(release.checkpoint_id, "cp-rel");
+  assert.equal(legacyReleaseApproval(null).checkpoint_id, null);
+});
+
+test("legacy source review synthesizes an approval fallback", () => {
+  const review = {
+    checkpoint_id: "cp-src",
+    hidden_candidate_count: 1,
+    retry_remaining: 1,
+    candidates: [{
+      id: "candidate-1",
+      url: "https://docs.python.org/3/",
+      title: "Python 文档",
+      status: "needs_human",
+      metadata_hash: "hash-1",
+    }],
+  };
+
+  const approval = runView.legacySourceApproval(review);
+  assert.equal(approval.type, "SOURCE_APPROVAL");
+  assert.equal(approval.checkpoint_id, "cp-src");
+  assert.deepEqual(approval.actions,
+    ["approve", "reject", "propose_url", "retry_search", "stop"]);
+  assert.deepEqual(approval.output.candidates, review.candidates);
+  assert.equal(approval.output.metrics.retry_remaining, 1);
+  assert.deepEqual(
+    runView.legacySourceApproval({ ...review, retry_remaining: 0 }).actions,
+    ["approve", "reject", "propose_url", "stop"],
+  );
 });

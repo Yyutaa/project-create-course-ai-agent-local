@@ -208,6 +208,30 @@ export type ExecutionCommand = {
   error: string | null;
 };
 
+export type ApprovalAction =
+  | "approve" | "revise" | "stop" | "retry" | "accept"
+  | "retry_search" | "reject" | "propose_url" | "prepare";
+
+export type ApprovalPayload = {
+  type:
+    | "MISSION_APPROVAL" | "QUALITY_APPROVAL"
+    | "SOURCE_APPROVAL" | "RELEASE_APPROVAL";
+  step: "mission" | "blueprint" | "generation" | "quality" | "release";
+  title: string;
+  output: {
+    summary: string;
+    metrics: Record<string, string | number | boolean | null>;
+    refs: ArtifactRef[];
+    candidates: {
+      id: string; url: string; title: string;
+      status: string; metadata_hash: string;
+    }[];
+  };
+  actions: ApprovalAction[];
+  guidance: string;
+  checkpoint_id: string | null;
+};
+
 export type ExecutionReadModel = {
   run_id: string;
   commands: ExecutionCommand[];
@@ -244,6 +268,7 @@ export type ExecutionReadModel = {
     tokens_used: number; token_limit: number | null;
     token_usage_unknown: number; token_exhausted: boolean;
   };
+  approval: ApprovalPayload | null;
 };
 
 export type SourceReadModel = {

@@ -839,6 +839,30 @@ button.secondary {
   gap: 9px;
 }
 
+.approval-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px 16px;
+  margin: 14px 0;
+}
+
+.approval-metrics div {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.approval-metrics dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.approval-metrics dd {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .workflow-list {
   display: grid;
   gap: 0;
