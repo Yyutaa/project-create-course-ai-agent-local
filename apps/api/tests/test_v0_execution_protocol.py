@@ -572,6 +572,12 @@ def test_reviewer_schema_failure_requires_explicit_retry_without_risk_acceptance
     assert review is not None and review.status == "retry_only"
     assert review.quality_ref is None
 
+    approval = commands.read_model(run_id).approval
+    assert approval is not None
+    assert approval.type == "QUALITY_APPROVAL"
+    assert approval.actions == ["retry"]
+    assert approval.output.metrics["status"] == "retry_only"
+
     commands.accept(run_id, "QUALITY_REVIEW", {
         "action": "accept", "lesson_ref": review.lesson_ref.model_dump(mode="json"),
         "expected_checkpoint_id": review.checkpoint_id,
@@ -654,6 +660,12 @@ def test_reviewer_retry_after_previous_lesson_risk_acceptance(stores):
     retry = commands.read_model(run_id).quality_review
     assert retry is not None and retry.status == "retry_only"
     assert retry.lesson_ref != first_review.lesson_ref
+    approval = commands.read_model(run_id).approval
+    assert approval is not None
+    assert approval.type == "QUALITY_APPROVAL"
+    assert approval.actions == ["retry"]
+    assert approval.output.metrics["status"] == "retry_only"
+    assert "manual_review" not in approval.output.summary
     commands.accept(run_id, "QUALITY_REVIEW", {
         "action": "retry", "lesson_ref": retry.lesson_ref.model_dump(mode="json"),
         "expected_checkpoint_id": retry.checkpoint_id,

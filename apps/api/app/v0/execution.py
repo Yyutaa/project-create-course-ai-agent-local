@@ -23,6 +23,13 @@ from app.v0.sensitive import (
     safe_waiting_reason,
 )
 from app.v0.budget import BudgetStore, BudgetSummary, TokenLimitReached
+from app.v0.approval import (
+    ApprovalPayload,
+    mission_approval,
+    quality_approval,
+    release_approval,
+    source_approval,
+)
 from app.v0.source_facts import SourceFacts
 from app.v0.source_tools import is_direct_document_host
 from app.v0.source_tools import canonical_public_url
@@ -125,6 +132,7 @@ class ExecutionReadModel(BaseModel):
     mission_review: MissionReviewView | None = None
     quality_review: QualityReviewView | None = None
     source_review: SourceReviewView | None = None
+    approval: ApprovalPayload | None = None
 
 
 class ExecutionStore:
@@ -1381,6 +1389,7 @@ class ExecutionStore:
                 "SELECT stop_requested, revision, human_input_json "
                 "FROM run_controls WHERE run_id=?", (run_id,),
             ).fetchone()
+        approval = None
         mission_review = None
         if self.facts.mission_review_required(run_id):
             missions = [
@@ -1406,6 +1415,10 @@ class ExecutionStore:
                         ),
                         checkpoint_id=(checkpoint["id"] if checkpoint and not approved else None),
                     )
+                    if not approved:
+                        approval = mission_approval(
+                            run, checkpoint_id=mission_review.checkpoint_id,
+                        )
         source_review = None
         quality_review = None
         if checkpoint is not None and checkpoint["position"] == "after_node":
@@ -1445,6 +1458,16 @@ class ExecutionStore:
                         ),
                         retry_remaining=max(0, 2 - retries),
                     )
+                    approval = source_approval(
+                        step=(
+                            context
+                            if context in ("blueprint", "generation")
+                            else "blueprint"
+                        ),
+                        checkpoint_id=source_review.checkpoint_id,
+                        candidates=all_candidates,
+                        retry_remaining=source_review.retry_remaining,
+                    )
             with self.facts.connect() as connection:
                 technical_retry = self._retryable_reviewer_failure(
                     connection, run, checkpoint, state
@@ -1481,6 +1504,21 @@ class ExecutionStore:
                         lesson_ref=lesson_ref,
                         checkpoint_id=checkpoint["id"],
                     )
+                    approval = quality_approval(
+                        run,
+                        checkpoint_id=quality_review.checkpoint_id,
+                        retry_only=quality_review.status == "retry_only",
+                        quality_ref=quality_review.quality_ref,
+                        lesson_ref=quality_review.lesson_ref,
+                    )
+        if (
+            approval is None
+            and run.status == "waiting_for_human"
+            and run.stages[-1].status == "waiting_for_human"
+        ):
+            approval = release_approval(
+                run, checkpoint_id=checkpoint["id"] if checkpoint else None,
+            )
         return ExecutionReadModel.model_validate({
             "run_id": run_id,
             "commands": [CommandView.model_validate({
@@ -1506,6 +1544,7 @@ class ExecutionStore:
             "mission_review": mission_review,
             "quality_review": quality_review,
             "source_review": source_review,
+            "approval": approval,
         })
 
     def last_checkpoint(self, run_id: str) -> dict | None:
