@@ -46,6 +46,10 @@ GraphOutcome = Literal[
     "pending", "succeeded", "failed", "waiting_for_human", "stopped", "unknown"
 ]
 ApprovalStatus = Literal["not_requested", "waiting_for_human", "prepare", "stop"]
+ApprovalAction = Literal[
+    "approve", "revise", "stop", "retry", "accept", "retry_search",
+    "reject", "propose_url", "prepare",
+]
 
 
 class ArtifactRef(BaseModel):
@@ -85,6 +89,7 @@ class GraphState(BaseModel):
     active_finding_id: str | None = None
     approval_status: ApprovalStatus = "not_requested"
     mission_decision: Literal["approve", "revise"] | None = None
+    approval_action: ApprovalAction | None = None
     gate_context: Literal["quality", "verification"] | None = None
     gate_reason: str | None = None
     source_gate_context: Literal["blueprint", "generation"] | None = None
