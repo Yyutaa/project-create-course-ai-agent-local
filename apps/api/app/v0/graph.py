@@ -5,6 +5,12 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
+from app.v0.approval import (
+    mission_approval,
+    quality_approval,
+    release_approval,
+    source_approval,
+)
 from app.v0.batching import assign_blueprint_ids, build_batch_plan, complete_batch
 from app.v0.context import ContextBudgetError, ContextPackBuilder
 from app.v0.context_contracts import RepairPackV1
@@ -21,6 +27,7 @@ from app.v0.quality_loop import (
 from app.v0.runner import V0_QUALITY_LIMITATIONS
 from app.v0.source_audit import source_gate
 from app.v0.skill_rules import repair_rules_for
+from app.v0.source_facts import SourceFacts
 from app.v0.token_preflight import TokenPreflightError
 from app.v0.schemas import (
     BLUEPRINT_CHAPTER_DEVIATION_REASON,
@@ -43,6 +50,13 @@ def _route_standard(state: GraphState, success_target: str) -> str:
     if state.last_outcome in ("failed", "waiting_for_human"):
         return END
     return "route_error"
+
+
+def route_from_action(
+    state: GraphState, *, targets: dict[str, str],
+    default: str = "route_error",
+) -> str:
+    return targets.get(state.approval_action or "", default)
 
 
 def route_start(state: GraphState) -> str:
@@ -75,11 +89,9 @@ def route_after_mission_flow(
 def route_after_mission_gate(state: GraphState) -> str:
     if state.last_outcome != "succeeded":
         return _route_standard(state, "blueprint")
-    if state.mission_decision == "approve":
-        return "blueprint"
-    if state.mission_decision == "revise":
-        return "mission"
-    return "route_error"
+    return route_from_action(
+        state, targets={"approve": "blueprint", "revise": "mission"},
+    )
 
 
 def route_after_blueprint(state: GraphState) -> str:
@@ -130,20 +142,21 @@ def route_after_repair(state: GraphState) -> str:
 def route_after_release_gate(state: GraphState) -> str:
     if state.last_outcome != "succeeded":
         return _route_standard(state, "release")
-    if state.approval_status in ("prepare", "stop"):
-        return "release"
-    return "route_error"
+    return route_from_action(
+        state, targets={"prepare": "release", "stop": "release"},
+    )
 
 
 def route_after_source_gate(state: GraphState) -> str:
     if state.last_outcome != "succeeded":
         return _route_standard(state, "blueprint")
-    if state.exit_reason == "source_retry":
-        return (
-            "generation" if state.source_gate_context == "generation"
-            else "blueprint"
-        )
-    return "route_error"
+    target = (
+        "generation" if state.source_gate_context == "generation"
+        else "blueprint"
+    )
+    return route_from_action(
+        state, targets={"approve": target, "retry_search": target},
+    )
 
 
 def route_after_verification(state: GraphState) -> str:
@@ -223,8 +236,11 @@ class WorkflowNodes:
         return self._stage(state, "quality", self._verification)
 
     def release_gate(self, state: GraphState) -> dict:
+        payload = release_approval(self.runner.get(state.run_id))
+        if payload is None:
+            raise GraphRouteError("Release gate 缺少质量结论")
         value = interrupt({
-            "type": "release_decision",
+            **payload.model_dump(mode="json"),
             "run_id": state.run_id,
         })
         if not isinstance(value, dict):
@@ -239,6 +255,7 @@ class WorkflowNodes:
         return {
             "current_node": "release_gate",
             "approval_status": decision.action,
+            "approval_action": decision.action,
             "release_decision": decision,
             "last_outcome": "succeeded",
         }
@@ -483,13 +500,17 @@ class WorkflowNodes:
             return {
                 "current_node": "mission_gate",
                 "mission_decision": "approve",
+                "approval_action": "approve",
                 "last_outcome": "succeeded",
             }
         reference = state.artifact_refs.get("mission")
         if reference is None:
             raise GraphRouteError("Mission gate 缺少 Mission 引用")
+        payload = mission_approval(self.runner.get(state.run_id))
+        if payload is None:
+            raise GraphRouteError("Mission gate 缺少 Mission 摘要")
         value = interrupt({
-            "type": "mission_review",
+            **payload.model_dump(mode="json"),
             "run_id": state.run_id,
             "mission_ref": reference.model_dump(mode="json"),
         })
@@ -506,6 +527,7 @@ class WorkflowNodes:
         return {
             "current_node": "mission_gate",
             "mission_decision": action,
+            "approval_action": action,
             "last_outcome": "succeeded",
         }
 
@@ -531,8 +553,20 @@ class WorkflowNodes:
         context = state.source_gate_context
         if context not in ("blueprint", "generation"):
             raise GraphRouteError("Source gate 缺少上下文")
+        candidates: list[dict] = []
+        retries = 0
+        if self.runner.store is not None:
+            facts = SourceFacts(self.runner.store)
+            candidates = facts.list_candidates(state.run_id)
+            retries = facts.retry_round(state.run_id)
+        payload = source_approval(
+            step=context,
+            checkpoint_id=None,
+            candidates=candidates,
+            retry_remaining=max(0, 2 - retries),
+        )
         value = interrupt({
-            "type": "source_review",
+            **payload.model_dump(mode="json"),
             "run_id": state.run_id,
             "context": context,
         })
@@ -543,6 +577,7 @@ class WorkflowNodes:
         return {
             "current_node": "source_gate",
             "source_gate_context": context,
+            "approval_action": value.get("action"),
             "last_outcome": "succeeded",
             "exit_reason": "source_retry",
         }
@@ -964,8 +999,28 @@ class WorkflowNodes:
         context = state.gate_context
         if context not in ("quality", "verification"):
             raise GraphRouteError("Quality gate 缺少上下文")
+        run = self.runner.get(state.run_id)
+        if run.blueprint is None or state.quality_cursor >= len(
+            run.blueprint.lessons
+        ):
+            raise GraphRouteError("Quality gate 缺少当前章节")
+        lesson_id = run.blueprint.lessons[state.quality_cursor].lesson_id
+        lesson_ref = state.artifact_refs.get(
+            "candidate" if context == "verification" else f"lesson:{lesson_id}"
+        )
+        if lesson_ref is None:
+            raise GraphRouteError("Quality gate 缺少 Lesson 引用")
+        payload = quality_approval(
+            run,
+            checkpoint_id=None,
+            retry_only=False,
+            quality_ref=state.artifact_refs.get("quality"),
+            lesson_ref=lesson_ref,
+        )
+        if payload is None:
+            raise GraphRouteError("Quality gate 缺少质量结论")
         value = interrupt({
-            "type": "quality_review",
+            **payload.model_dump(mode="json"),
             "run_id": state.run_id,
             "context": context,
             "reason": state.gate_reason,
@@ -988,6 +1043,7 @@ class WorkflowNodes:
         if action == "retry":
             return {
                 "current_node": "quality_gate",
+                "approval_action": action,
                 "last_outcome": "succeeded",
                 "exit_reason": "quality_retry",
             }
@@ -1000,6 +1056,7 @@ class WorkflowNodes:
             )
         updates = {
             "current_node": "quality_gate",
+            "approval_action": action,
             "quality_cursor": cursor,
             "artifact_refs": state.artifact_refs,
             "gate_context": None,

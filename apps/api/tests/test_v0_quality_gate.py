@@ -1,5 +1,11 @@
 import pytest
 
+from app.v0.graph import build_graph
+from app.v0.langgraph_checkpoint import (
+    checkpoint_path,
+    open_checkpointer,
+    thread_config,
+)
 from app.v0.provider import AgentResponse, FakeProvider
 from app.v0.schemas import CourseInput
 from app.v0.storage import FactStore
@@ -76,7 +82,7 @@ def test_quality_gate_interrupts_and_accepts_risk(tmp_path):
     assert current.stages[5].status == "waiting_for_human"
     with facts.connect() as connection:
         execution = connection.execute(
-            "SELECT status, pending_interrupt_id FROM node_executions "
+            "SELECT id, status, pending_interrupt_id FROM node_executions "
             "WHERE run_id=? AND node='quality_gate' ORDER BY rowid DESC LIMIT 1",
             (run.id,),
         ).fetchone()
@@ -94,6 +100,21 @@ def test_quality_gate_interrupts_and_accepts_risk(tmp_path):
     review = commands.read_model(run.id).quality_review
     assert review is not None and review.status == "pending"
     assert review.quality_ref is not None
+
+    approval = commands.read_model(run.id).approval
+    assert approval is not None
+    assert approval.type == "QUALITY_APPROVAL"
+    assert approval.checkpoint_id == execution["id"]
+    assert review.checkpoint_id == execution["id"]
+    assert "approve" not in approval.actions
+    assert approval.actions == ["retry", "accept", "stop"]
+
+    with open_checkpointer(checkpoint_path(facts.path)) as saver:
+        graph = build_graph(worker.runner, checkpointer=saver)
+        snapshot = graph.get_state(thread_config(run.id))
+    assert snapshot.interrupts
+    assert snapshot.interrupts[0].value["type"] == "QUALITY_APPROVAL"
+    assert "approve" not in snapshot.interrupts[0].value["actions"]
 
     commands.accept(
         run.id, "QUALITY_REVIEW", accept_payload(review), "quality-accept",

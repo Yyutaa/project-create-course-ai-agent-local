@@ -29,6 +29,7 @@ def test_graph_state_has_only_frozen_control_fields_and_artifact_references():
         "active_finding_id",
         "approval_status",
         "mission_decision",
+        "approval_action",
         "gate_context",
         "gate_reason",
         "source_gate_context",

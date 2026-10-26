@@ -1,9 +1,12 @@
+import json
+
 from langgraph.graph import END
 
 from app.v0.graph import (
     build_graph,
     route_after_mission_flow,
     route_after_mission_gate,
+    route_from_action,
 )
 from app.v0.langgraph_checkpoint import (
     checkpoint_path,
@@ -21,12 +24,30 @@ def state(**updates):
     return GraphState(run_id="run-1", current_node="mission_gate", **updates)
 
 
+def test_route_from_action_uses_normalized_action():
+    state = GraphState(
+        run_id="run-1", current_node="mission_gate",
+        last_outcome="succeeded", approval_action="approve",
+    )
+    assert route_from_action(
+        state, targets={"approve": "blueprint", "revise": "mission"},
+    ) == "blueprint"
+    revised = state.model_copy(update={"approval_action": "revise"})
+    assert route_from_action(
+        revised, targets={"approve": "blueprint", "revise": "mission"},
+    ) == "mission"
+    missing = state.model_copy(update={"approval_action": None})
+    assert route_from_action(
+        missing, targets={"approve": "blueprint", "revise": "mission"},
+    ) == "route_error"
+
+
 def test_route_after_mission_gate():
     assert route_after_mission_gate(
-        state(last_outcome="succeeded", mission_decision="approve")
+        state(last_outcome="succeeded", approval_action="approve")
     ) == "blueprint"
     assert route_after_mission_gate(
-        state(last_outcome="succeeded", mission_decision="revise")
+        state(last_outcome="succeeded", approval_action="revise")
     ) == "mission"
     assert route_after_mission_gate(
         state(last_outcome="waiting_for_human")
@@ -106,10 +127,18 @@ def test_mission_gate_interrupts_and_approval_resumes(tmp_path):
     assert review is not None and review.status == "pending"
     assert review.checkpoint_id == execution["id"]
 
+    approval = commands.read_model(run.id).approval
+    assert approval is not None
+    assert approval.type == "MISSION_APPROVAL"
+    assert approval.checkpoint_id == execution["id"]
+    assert approval.actions == ["approve", "revise", "stop"]
+
     with open_checkpointer(checkpoint_path(facts.path)) as saver:
         graph = build_graph(worker.runner, checkpointer=saver)
         snapshot = graph.get_state(thread_config(run.id))
     assert snapshot.interrupts
+    assert snapshot.interrupts[0].value["type"] == "MISSION_APPROVAL"
+    assert snapshot.interrupts[0].value["actions"] == ["approve", "revise", "stop"]
 
     commands.accept(
         run.id, "MISSION_REVIEW", approve_payload(review), "approve-1",
@@ -118,6 +147,57 @@ def test_mission_gate_interrupts_and_approval_resumes(tmp_path):
     resumed = facts.get_run(run.id)
     assert resumed.stages[1].status == "succeeded"
     assert resumed.blueprint is not None
+
+
+def test_pre_upgrade_checkpoint_without_approval_action_resumes(tmp_path):
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run = make_run(facts)
+    worker = Worker(facts.path, provider=FakeProvider(), owner="worker-a")
+    assert worker.run_once()
+    commands = worker.execution
+
+    review = commands.read_model(run.id).mission_review
+    assert review is not None
+
+    # A checkpoint written by a version before approval_action existed has no
+    # such key in its persisted state. Resuming must re-execute the Gate, which
+    # writes approval_action again and routes to the expected next node.
+    with facts.connect() as connection:
+        execution = connection.execute(
+            "SELECT id, waiting_state_json FROM node_executions "
+            "WHERE run_id=? AND node='mission_gate' AND status='WAITING' "
+            "ORDER BY rowid DESC LIMIT 1",
+            (run.id,),
+        ).fetchone()
+        legacy_state = json.loads(execution["waiting_state_json"])
+        legacy_state.pop("approval_action")
+        connection.execute(
+            "UPDATE node_executions SET waiting_state_json=? WHERE id=?",
+            (json.dumps(legacy_state), execution["id"]),
+        )
+        persisted = connection.execute(
+            "SELECT waiting_state_json FROM node_executions WHERE id=?",
+            (execution["id"],),
+        ).fetchone()
+    assert "approval_action" not in json.loads(persisted["waiting_state_json"])
+
+    commands.accept(
+        run.id, "MISSION_REVIEW", approve_payload(review), "approve-legacy-state",
+    )
+    assert worker.run_once()
+
+    resumed = facts.get_run(run.id)
+    assert resumed.stages[1].status == "succeeded"
+    assert resumed.blueprint is not None
+    with facts.connect() as connection:
+        after = connection.execute(
+            "SELECT after_state_json FROM node_executions "
+            "WHERE run_id=? AND node='mission_gate' AND id=?",
+            (run.id, execution["id"]),
+        ).fetchone()
+    assert after["after_state_json"] is not None
+    assert json.loads(after["after_state_json"])["approval_action"] == "approve"
 
 
 def test_mission_gate_revision_regenerates_and_interrupts_again(tmp_path):
