@@ -19,6 +19,7 @@ from app.v0.schemas import (
 from app.v0.sensitive import (
     HIDDEN_PROVIDER_ERROR,
     is_reviewer_schema_error,
+    mission_review_downstream_error,
     safe_recorded_error,
     safe_waiting_reason,
 )
@@ -1285,9 +1286,10 @@ class ExecutionStore:
 
     def prepare_resume(
         self, run_id: str, owner: str, epoch: int, payload: dict | None = None,
-    ) -> None:
+    ) -> str | None:
         run = self.facts.get_run(run_id)
         payload = payload or {}
+        resume_mode = None
         with self.facts.connect() as connection:
             token_stopped = connection.execute(
                 "SELECT 1 FROM events WHERE run_id=? "
@@ -1300,7 +1302,26 @@ class ExecutionStore:
             run.langgraph_flow_version == 1
             and self.waiting_interrupt_id(run_id) is not None
         ):
-            raise ValueError("人工 Gate 等待决策，不能由 RESUME 替代")
+            gate = self.waiting_gate_state(run_id)
+            mission_ref = (
+                GraphState.model_validate_json(gate["state_json"])
+                .artifact_refs.get("mission")
+                if gate and gate["node"] == "mission_gate" else None
+            )
+            review = self.facts.latest_mission_review(run_id)
+            if not (
+                mission_ref is not None
+                and mission_ref.run_id == run_id
+                and review is not None
+                and review["action"] == "approve"
+                and review["artifact_id"] == mission_ref.artifact_id
+                and review["artifact_version"] == mission_ref.version
+                and review["content_hash"] == mission_ref.content_hash
+            ):
+                if gate and gate["node"] == "mission_gate":
+                    raise ValueError("Mission 待人工确认，请提交 MISSION_REVIEW")
+                raise ValueError("人工 Gate 等待决策，不能由 RESUME 替代")
+            resume_mode = "replay_approved_mission_gate"
         checkpoint = self.last_checkpoint(run_id)
         if checkpoint is None:
             raise ValueError("RESUME 缺少合法 checkpoint")
@@ -1321,7 +1342,11 @@ class ExecutionStore:
                 "source_evidence_insufficient", "source_review_required",
             ):
                 raise ValueError("来源尚未获人工确认，不能由 RESUME 替代")
-        if state.current_node == "mission" and self.facts.mission_review_required(run_id):
+        if (
+            run.langgraph_flow_version == 0
+            and state.current_node == "mission"
+            and self.facts.mission_review_required(run_id)
+        ):
             mission_ref = state.artifact_refs.get("mission")
             if mission_ref is not None:
                 review = self.facts.latest_mission_review(run_id)
@@ -1374,6 +1399,59 @@ class ExecutionStore:
             run, "run.resumed", active.name if active else None,
             lease_owner=owner, lease_epoch=epoch, clear_stop=True,
         )
+        return resume_mode
+
+    def complete_approved_duplicate_gate(
+        self, run_id: str, owner: str, epoch: int,
+    ) -> None:
+        """Retire an obsolete interrupt backed by the exact human approval."""
+        with self.facts.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_lease(connection, run_id, owner, epoch)
+            gate = connection.execute(
+                "SELECT id, waiting_state_json FROM node_executions "
+                "WHERE run_id=? AND node='mission_gate' AND status='WAITING' "
+                "AND pending_interrupt_id IS NOT NULL "
+                "ORDER BY rowid DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if gate is None:
+                raise ValueError("Mission 中断已变化")
+            state = GraphState.model_validate_json(gate["waiting_state_json"])
+            reference = state.artifact_refs.get("mission")
+            review = connection.execute(
+                "SELECT action, artifact_id, artifact_version, content_hash "
+                "FROM mission_reviews WHERE run_id=? ORDER BY rowid DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if not (
+                reference is not None
+                and reference.run_id == run_id
+                and review is not None
+                and review["action"] == "approve"
+                and review["artifact_id"] == reference.artifact_id
+                and review["artifact_version"] == reference.version
+                and review["content_hash"] == reference.content_hash
+            ):
+                raise ValueError("Mission 已批准版本与中断引用不一致")
+            approved = state.model_copy(update={
+                "last_outcome": "succeeded",
+                "exit_reason": None,
+                "pending_interrupt_id": None,
+                "mission_decision": "approve",
+                "approval_action": "approve",
+            })
+            checkpoint_id = self._checkpoint(
+                connection, run_id, gate["id"], "after_node", approved,
+            )
+            connection.execute(
+                "UPDATE node_executions SET status='COMMITTED', "
+                "after_checkpoint_id=?, after_state_json=?, "
+                "pending_interrupt_id=NULL, error=NULL, updated_at=? "
+                "WHERE id=? AND status='WAITING'",
+                (checkpoint_id, approved.model_dump_json(), _utc().isoformat(),
+                 gate["id"]),
+            )
 
     def read_model(self, run_id: str) -> ExecutionReadModel:
         run = self.facts.get_run(run_id)
@@ -1519,11 +1597,37 @@ class ExecutionStore:
             approval = release_approval(
                 run, checkpoint_id=checkpoint["id"] if checkpoint else None,
             )
+        failed_stage = next(
+            (stage for stage in run.stages if stage.status == "failed"), None,
+        )
+        with self.facts.connect() as connection:
+            reviewed_commands = {
+                row["command_id"] for row in connection.execute(
+                    "SELECT command_id FROM mission_reviews WHERE run_id=?",
+                    (run_id,),
+                )
+            }
+
+        def command_error(item: Command) -> str | None:
+            if item.error is None:
+                return None
+            if (
+                item.kind == "MISSION_REVIEW"
+                and item.status == "FAILED"
+                and item.id in reviewed_commands
+                and item.error == "RuntimeError：细节已隐藏，请检查受限诊断信息"
+                and failed_stage is not None
+            ):
+                return mission_review_downstream_error(
+                    failed_stage.name, failed_stage.failure_reason or "",
+                )
+            return safe_recorded_error(item.error)
+
         return ExecutionReadModel.model_validate({
             "run_id": run_id,
             "commands": [CommandView.model_validate({
                 **item.model_dump(),
-                "error": safe_recorded_error(item.error) if item.error else None,
+                "error": command_error(item),
             }) for item in commands],
             "current_node": node["node"] if node else None,
             "node_status": node["status"] if node else None,

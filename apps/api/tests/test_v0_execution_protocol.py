@@ -1,6 +1,7 @@
 """Durable execution protocol tests against a real SQLite file."""
 
 import pytest
+from pydantic import BaseModel, Field, ValidationError
 
 from app.v0.execution import ExecutionStore
 from app.v0.schemas import CourseInput
@@ -11,7 +12,8 @@ from app.v0.storage import FactStore
 from app.v0.provider import FakeProvider
 from app.v0.provider import AgentResponse
 from app.v0.provider import ProviderError
-from app.v0.sensitive import safe_error
+from app.v0.sensitive import safe_error, safe_recorded_error, safe_waiting_reason
+from app.v0.token_preflight import TokenPreflightError
 from app.v0.worker import Worker
 
 
@@ -615,6 +617,41 @@ def test_reviewer_gate_schema_error_exposes_only_field_path_and_type():
     assert "SECRET" not in safe_error(
         ProviderError("reviewer rubric 输出校验失败：SECRET (literal_error)")
     )
+
+
+def test_recorded_value_error_keeps_its_safe_type_without_leaking_details():
+    recorded = safe_error(ValueError("SECRET"))
+    assert safe_recorded_error(recorded) == recorded
+    assert "SECRET" not in safe_recorded_error("ValueError：SECRET")
+
+
+def test_token_preflight_reason_is_readable_without_exposing_unknown_text():
+    legacy = safe_recorded_error("token_preflight_rejected")
+    assert "Token 预检未通过" in legacy
+    assert "具体原因未保存" in legacy
+    assert safe_waiting_reason("token_preflight_rejected") == legacy
+
+    detail = "最终消息预估 10000 Token，预留后需 12128 Token，超过 12000 Token 预算"
+    assert safe_recorded_error(detail) == detail
+    assert safe_waiting_reason(detail) == detail
+    assert "SECRET" not in safe_recorded_error(detail + " SECRET")
+    assert "SECRET" not in safe_error(TokenPreflightError("SECRET"))
+
+
+def test_validation_error_shows_field_and_type_without_input():
+    class SourceSummary(BaseModel):
+        title: str = Field(min_length=1)
+
+    class WriterPack(BaseModel):
+        source_summaries: list[SourceSummary]
+
+    with pytest.raises(ValidationError) as raised:
+        WriterPack.model_validate({
+            "source_summaries": [{"title": ""}],
+        })
+    summary = safe_error(raised.value)
+    assert summary == "数据校验失败：source_summaries.0.title (string_too_short)"
+    assert safe_recorded_error(summary) == summary
 
 
 def test_reviewer_retry_after_previous_lesson_risk_acceptance(stores):

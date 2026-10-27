@@ -32,7 +32,7 @@ def test_preflight_counts_the_exact_messages_rendered_for_provider():
 def test_preflight_rejects_unsupported_model_and_excess_before_send():
     with pytest.raises(TokenPreflightError, match="tokenizer"):
         preflight_request(request(), "unknown-model")
-    with pytest.raises(TokenPreflightError, match="预算"):
+    with pytest.raises(TokenPreflightError, match=r"预估 [0-9]+ Token，预留后需 [0-9]+ Token，超过 100 Token 预算"):
         preflight_request(
             request(), "deepseek-flash", counter=lambda value: len(value),
             token_limit=100,

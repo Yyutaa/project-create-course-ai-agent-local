@@ -14,6 +14,7 @@ from app.v0.provider import FakeProvider
 from app.v0.provider import AgentResponse
 from app.v0.worker import Worker
 from app.v0.delivery import DeliveryStore
+from app.v0.token_preflight import TokenPreflightError
 
 
 COURSE = CourseInput(
@@ -148,6 +149,212 @@ def test_new_run_waits_for_mission_review_before_blueprint(tmp_path):
     assert current.mission is not None
     assert current.blueprint is None
     assert len([a for a in facts.list_artifacts(run.id) if a.kind == "mission"]) == 1
+
+
+def test_stop_after_mission_can_resume_into_langgraph_mission_gate(tmp_path):
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(COURSE, "stop-before-gate", enqueue_start=True)
+    commands = ExecutionStore(facts.path)
+
+    class StopDuringMission(FakeProvider):
+        def invoke(self, request):
+            if request.role == "mission":
+                commands.accept(run.id, "STOP", {}, "stop-during-mission")
+            return super().invoke(request)
+
+    worker = Worker(facts.path, provider=StopDuringMission())
+    assert worker.run_once()  # Mission commits, then STOP blocks mission_gate.
+    assert worker.run_once()  # Apply STOP.
+    stopped = facts.get_run(run.id)
+    assert stopped.status == "stopped"
+    assert stopped.stages[1].status == "succeeded"
+    assert commands.waiting_interrupt_id(run.id) is None
+    assert facts.latest_mission_review(run.id) is None
+
+    commands.accept(run.id, "RESUME", {}, "resume-to-gate")
+    assert worker.run_once()
+    resumed = facts.get_run(run.id)
+    assert commands.list_commands(run.id)[-1].status == "APPLIED"
+    assert resumed.status == "waiting_for_human"
+    assert resumed.stages[1].status == "waiting_for_human"
+    assert resumed.blueprint is None
+    assert commands.waiting_interrupt_id(run.id) is not None
+    assert facts.latest_mission_review(run.id) is None
+    assert len([a for a in facts.list_artifacts(run.id) if a.kind == "mission"]) == 1
+
+    commands.accept(run.id, "RESUME", {}, "resume-cannot-approve")
+    assert worker.run_once()
+    assert commands.list_commands(run.id)[-1].status == "REJECTED"
+    assert commands.list_commands(run.id)[-1].error == (
+        "Mission 待人工确认，请提交 MISSION_REVIEW"
+    )
+    assert facts.get_run(run.id).blueprint is None
+    assert facts.latest_mission_review(run.id) is None
+
+
+def test_blueprint_resume_reuses_approved_mission_gate(tmp_path):
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    course = COURSE.model_copy(update={
+        "expected_chapters": 1, "min_effective_chars": 1,
+    })
+    run, _ = facts.create_run(course, "blueprint-preflight", enqueue_start=True)
+    disable_source_evidence(facts, run.id)
+    commands = ExecutionStore(facts.path)
+
+    class BlueprintPreflightOnce(FakeProvider):
+        rejected = False
+
+        def preflight(self, request):
+            if request.role == "blueprint" and not self.rejected:
+                self.rejected = True
+                raise TokenPreflightError("最终消息超过 Token 预算")
+
+    worker = Worker(facts.path, provider=BlueprintPreflightOnce())
+    assert worker.run_once()
+    commands.accept(
+        run.id, "MISSION_REVIEW",
+        review_payload(facts, commands, run.id, "approve"),
+        "approve-mission",
+    )
+    assert worker.run_once()
+    assert facts.get_run(run.id).stages[2].failure_reason == "最终消息超过 Token 预算"
+    assert commands.read_model(run.id).waiting_reason == "最终消息超过 Token 预算"
+    approved = facts.latest_mission_review(run.id)
+    assert approved["action"] == "approve"
+
+    commands.accept(run.id, "RESUME", {}, "resume-blueprint")
+    assert worker.run_once()
+    assert commands.list_commands(run.id)[-1].status == "APPLIED"
+    assert facts.get_run(run.id).blueprint is not None
+    gate = commands.waiting_gate_state(run.id)
+    assert gate is None or gate["node"] != "mission_gate"
+    assert facts.latest_mission_review(run.id)["id"] == approved["id"]
+
+
+def test_resume_recovers_stale_gate_for_exactly_approved_mission(tmp_path, monkeypatch):
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    course = COURSE.model_copy(update={
+        "expected_chapters": 1, "min_effective_chars": 1,
+    })
+    run, _ = facts.create_run(course, "stale-approved-gate", enqueue_start=True)
+    disable_source_evidence(facts, run.id)
+    commands = ExecutionStore(facts.path)
+
+    class BlueprintPreflightOnce(FakeProvider):
+        rejected = False
+
+        def preflight(self, request):
+            if request.role == "blueprint" and not self.rejected:
+                self.rejected = True
+                raise TokenPreflightError("最终消息超过 Token 预算")
+
+    worker = Worker(facts.path, provider=BlueprintPreflightOnce())
+    assert worker.run_once()
+    commands.accept(
+        run.id, "MISSION_REVIEW",
+        review_payload(facts, commands, run.id, "approve"),
+        "approve-stale-mission",
+    )
+    assert worker.run_once()
+    approved = facts.latest_mission_review(run.id)
+
+    # Recreate the old replay behavior once, then restore the real store.
+    original_review = worker.runner.store.latest_mission_review
+    monkeypatch.setattr(
+        worker.runner.store, "latest_mission_review", lambda _: None,
+    )
+    commands.accept(run.id, "RESUME", {}, "recreate-stale-gate")
+    assert worker.run_once()
+    monkeypatch.setattr(
+        worker.runner.store, "latest_mission_review", original_review,
+    )
+    gate = commands.waiting_gate_state(run.id)
+    assert gate is not None and gate["node"] == "mission_gate"
+    assert facts.get_run(run.id).blueprint is None
+
+    with facts.connect() as connection:
+        connection.execute(
+            "UPDATE mission_reviews SET content_hash=? WHERE id=?",
+            ("different-hash", approved["id"]),
+        )
+    commands.accept(run.id, "RESUME", {}, "reject-stale-hash")
+    assert worker.run_once()
+    assert commands.list_commands(run.id)[-1].status == "REJECTED"
+    with facts.connect() as connection:
+        connection.execute(
+            "UPDATE mission_reviews SET content_hash=? WHERE id=?",
+            (approved["content_hash"], approved["id"]),
+        )
+
+    commands.accept(run.id, "RESUME", {}, "recover-stale-gate")
+    # A restarted Worker may use a different provider fingerprint than the
+    # one that wrote this obsolete interrupt.
+    commands.expire_for_test(run.id)
+    assert Worker(facts.path, provider=FakeProvider()).run_once()
+    assert commands.list_commands(run.id)[-1].status == "APPLIED"
+    assert facts.get_run(run.id).blueprint is not None
+    assert facts.latest_mission_review(run.id)["id"] == approved["id"]
+
+
+def test_mission_review_failure_names_downstream_stage_and_safe_cause(tmp_path):
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        COURSE.model_copy(update={
+            "expected_chapters": 1, "min_effective_chars": 1,
+        }),
+        "review-downstream-failure", enqueue_start=True,
+    )
+    disable_source_evidence(facts, run.id)
+    commands = ExecutionStore(facts.path)
+    worker = Worker(facts.path, provider=FakeProvider(fail_at="writer"))
+    assert worker.run_once()
+    commands.accept(
+        run.id, "MISSION_REVIEW",
+        review_payload(facts, commands, run.id, "approve"),
+        "approve-before-writer-fails",
+    )
+    assert worker.run_once()
+    result = commands.list_commands(run.id)[-1]
+    assert result.status == "FAILED"
+    assert result.error == (
+        "Mission 审批已保存；后续 generation 阶段失败：writer 固定失败夹具"
+    )
+    assert commands.read_model(run.id).commands[-1].error == result.error
+    assert facts.latest_mission_review(run.id)["action"] == "approve"
+
+
+def test_historical_hidden_mission_review_error_uses_persisted_stage(tmp_path):
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run, _ = facts.create_run(
+        COURSE.model_copy(update={
+            "expected_chapters": 1, "min_effective_chars": 1,
+        }),
+        "historical-review-error", enqueue_start=True,
+    )
+    disable_source_evidence(facts, run.id)
+    commands = ExecutionStore(facts.path)
+    worker = Worker(facts.path, provider=FakeProvider(fail_at="writer"))
+    assert worker.run_once()
+    commands.accept(
+        run.id, "MISSION_REVIEW",
+        review_payload(facts, commands, run.id, "approve"),
+        "approve-before-historical-error",
+    )
+    assert worker.run_once()
+    command = commands.list_commands(run.id)[-1]
+    with facts.connect() as connection:
+        connection.execute(
+            "UPDATE commands SET error=? WHERE id=?",
+            ("RuntimeError：细节已隐藏，请检查受限诊断信息", command.id),
+        )
+    assert commands.read_model(run.id).commands[-1].error == (
+        "Mission 审批已保存；后续 generation 阶段失败：writer 固定失败夹具"
+    )
 
 
 def test_revision_context_and_source_reference_are_limited_to_prior_mission(tmp_path):

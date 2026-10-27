@@ -344,7 +344,7 @@ class WorkflowNodes:
             }
         except TokenPreflightError as error:
             self.runner._failure_class = None
-            self.runner._mark_waiting(state.run_id, index, error.code)
+            self.runner._mark_waiting(state.run_id, index, safe_error(error))
             return {
                 "current_node": stage,
                 "last_outcome": "waiting_for_human",
@@ -507,6 +507,18 @@ class WorkflowNodes:
         reference = state.artifact_refs.get("mission")
         if reference is None:
             raise GraphRouteError("Mission gate 缺少 Mission 引用")
+        review = self.runner.store.latest_mission_review(state.run_id)
+        if review and review["action"] == "approve" and (
+            review["artifact_id"] == reference.artifact_id
+            and review["artifact_version"] == reference.version
+            and review["content_hash"] == reference.content_hash
+        ):
+            return {
+                "current_node": "mission_gate",
+                "mission_decision": "approve",
+                "approval_action": "approve",
+                "last_outcome": "succeeded",
+            }
         payload = mission_approval(self.runner.get(state.run_id))
         if payload is None:
             raise GraphRouteError("Mission gate 缺少 Mission 摘要")

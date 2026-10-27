@@ -14,7 +14,7 @@ from app.v0.graph import (
 from app.v0.local_config import LocalConfigStore
 from app.v0.provider import LocalConfiguredProvider
 from app.v0.budget import BudgetedProvider, BudgetStore, TokenLimitReached
-from app.v0.sensitive import safe_error
+from app.v0.sensitive import safe_error, mission_review_downstream_error
 from app.v0.runner import V0Runner
 from app.v0.schemas import GraphState
 from app.v0.storage import FactStore
@@ -52,6 +52,17 @@ class Worker:
             self.budgeted_provider, facts, source_runtime=self.source_runtime,
         )
         self.owner = owner or uuid4().hex
+
+    def _mission_review_failure(self, run_id: str) -> RuntimeError:
+        failed = next(
+            (stage for stage in self.runner.get(run_id).stages
+             if stage.status == "failed"), None,
+        )
+        if failed is None:
+            return RuntimeError("Mission 审批已保存；后续阶段失败，请查看执行记录")
+        return RuntimeError(mission_review_downstream_error(
+            failed.name, failed.failure_reason or "",
+        ))
 
     def _resume_state(self, run_id: str) -> GraphState | None:
         checkpoint = self.execution.last_checkpoint(run_id)
@@ -209,7 +220,7 @@ class Worker:
                 except TokenLimitReached as error:
                     self._mark_token_stopped(run_id, epoch, error)
                 if self.runner.get(run_id).status == "failed":
-                    raise RuntimeError("Graph 节点业务失败；不自动重试")
+                    raise self._mission_review_failure(run_id)
                 return
             state = self._resume_state(run_id)
             if state is None:
@@ -229,7 +240,7 @@ class Worker:
             except TokenLimitReached as error:
                 self._mark_token_stopped(run_id, epoch, error)
             if self.runner.get(run_id).status == "failed":
-                raise RuntimeError("Graph 节点业务失败；不自动重试")
+                raise self._mission_review_failure(run_id)
             return
         if command.kind == "SOURCE_REVIEW":
             decision = self.execution.apply_source_review(
@@ -360,10 +371,13 @@ class Worker:
                 raise RuntimeError("Graph 节点业务失败；不自动重试")
             return
         run = self.runner.get(run_id)
+        resume_mode = None
         if command.kind == "RESUME":
             if run.status not in ("stopped", "waiting_for_human"):
                 raise ValueError("RESUME 仅允许从停止或等待人工状态继续")
-            self.execution.prepare_resume(run_id, self.owner, epoch, command.payload)
+            resume_mode = self.execution.prepare_resume(
+                run_id, self.owner, epoch, command.payload,
+            )
         elif run.status != "running":
             run, checkpoint = self._reconcile_after_artifact(run_id, epoch)
             if run.status in ("waiting_for_human", "stopped", "ready_for_release"):
@@ -373,15 +387,33 @@ class Worker:
                 raise RuntimeError("Graph 节点业务失败；不自动重试")
             raise ValueError("START 不允许从业务失败或终态重试")
         if run.langgraph_flow_version == 1:
+            replay_state = None
+            if resume_mode == "replay_approved_mission_gate":
+                gate = self.execution.waiting_gate_state(run_id)
+                if gate is None:
+                    raise ValueError("Mission 中断已变化")
+                replay_state = GraphState.model_validate_json(
+                    gate["state_json"],
+                ).model_copy(update={
+                    "last_outcome": "pending",
+                    "exit_reason": None,
+                    "pending_interrupt_id": None,
+                })
+                self.execution.complete_approved_duplicate_gate(
+                    run_id, self.owner, epoch,
+                )
             # LangGraph owns the position: continue the pending node when
             # possible, otherwise replay from START and let NodeExecution
             # reuse/effect ledger skip committed work.
             try:
                 self.runner.execute(
-                    run_id, state=None, execution=self.execution,
+                    run_id, state=replay_state, execution=self.execution,
                     owner=self.owner, epoch=epoch,
                     command_id=command.id,
-                    resume_graph=self._langgraph_has_pending_task(run_id),
+                    resume_graph=(
+                        resume_mode is None
+                        and self._langgraph_has_pending_task(run_id)
+                    ),
                 )
             except StopRequested:
                 self._mark_stopped(run_id, epoch)

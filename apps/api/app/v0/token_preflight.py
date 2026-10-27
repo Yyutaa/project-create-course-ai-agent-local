@@ -84,6 +84,10 @@ def preflight_request(
         final_messages, counter=counter or _counter(), tools=tools,
     )
     limit = token_limit or TOKEN_BUDGETS[request.role]
-    if estimated * 1.2 + 128 > limit:
-        raise TokenPreflightError("最终消息超过 Token 预算")
+    required = (estimated * 6 + 4) // 5 + 128
+    if required > limit:
+        raise TokenPreflightError(
+            f"最终消息预估 {estimated} Token，预留后需 {required} Token，"
+            f"超过 {limit} Token 预算"
+        )
     return PreflightResult(final_messages, estimated, limit)
