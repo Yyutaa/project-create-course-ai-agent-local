@@ -17,6 +17,10 @@ MAX_TOOL_ROUNDS = 6
 MAX_CALLS_PER_TURN = 4
 
 
+class SourceEvidencePending(ProviderError):
+    """The bounded tool loop ended without an eligible source document."""
+
+
 def _within_official_host(url: str, official_host: str) -> bool:
     host = urlsplit(url).hostname
     return host == official_host or bool(
@@ -141,6 +145,8 @@ class SourceToolRuntime:
                 role=request.role, payload=payload,
                 input_tokens=turn.input_tokens, output_tokens=turn.output_tokens,
             )
+        if not self.facts.summary_pack(request.run_id):
+            raise SourceEvidencePending("来源工具轮次已用尽，需人工核验来源")
         raise ProviderError("来源工具循环达到轮次上限")
 
     def _dispatch(

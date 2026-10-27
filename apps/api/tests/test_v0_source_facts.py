@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.v0.schemas import CourseInput
+from app.v0.context_contracts import SourceSummaryV1
 from app.v0.source_facts import SourceFacts, ToolBudgetExceeded
 from app.v0.storage import FactStore
 
@@ -116,6 +117,36 @@ def test_search_and_fetch_record_exact_candidate_and_page_versions(source_store)
         "excerpt": "# Guide\n\nref() stores reactive state.",
         "content_hash": page["content_hash"],
     }]
+
+
+@pytest.mark.parametrize("missing_title", ["", "   "])
+def test_titleless_eligible_document_has_valid_summary_without_rewriting_fact(
+    source_store, missing_title,
+):
+    _, sources, run_id = source_store
+    search_id, _ = sources.begin_call(
+        run_id, "course.source.search", {"query": "Vue official"},
+        "worker-a", 1, "blueprint", "command-1",
+    )
+    candidate = sources.finish_search(
+        search_id, "worker-a", 1,
+        [{"url": "https://vuejs.org/guide", "title": missing_title}],
+    )["candidates"][0]
+    fetch_id, _ = sources.begin_call(
+        run_id, "course.source.fetch",
+        {"candidate_id": candidate["candidate_id"]},
+        "worker-a", 1, "blueprint", "command-1",
+    )
+    sources.finish_fetch(
+        fetch_id, "worker-a", 1, candidate["candidate_id"],
+        missing_title, "# Guide\n\nOfficial content.",
+        {"official_host": "vuejs.org"},
+    )
+
+    assert sources.list_documents(run_id)[0]["title"] == missing_title
+    summary = sources.summary_pack(run_id)[0]
+    assert summary["title"] == "https://vuejs.org/guide"
+    SourceSummaryV1.model_validate(summary)
 
 
 def test_fetch_rejects_identity_for_different_host(source_store):

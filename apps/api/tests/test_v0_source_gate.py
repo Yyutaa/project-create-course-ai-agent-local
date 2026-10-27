@@ -4,7 +4,7 @@ from app.v0.langgraph_checkpoint import (
     open_checkpointer,
     thread_config,
 )
-from app.v0.provider import FakeProvider
+from app.v0.provider import FakeProvider, ToolCall, ToolTurn
 from app.v0.schemas import CourseInput, GraphState
 from app.v0.storage import FactStore
 from app.v0.worker import Worker
@@ -57,6 +57,49 @@ def make_run(facts: FactStore):
         )
         connection.execute("DELETE FROM snapshots WHERE run_id=?", (run.id,))
     return run
+
+
+def test_tool_round_limit_without_verified_document_waits_for_source_review(tmp_path):
+    facts = FactStore(tmp_path / "facts.sqlite3")
+    facts.migrate()
+    run = make_run(facts)
+
+    class SearchingProvider(FakeProvider):
+        def next_tool_turn(self, request, messages):
+            if request.role != "blueprint":
+                return super().next_tool_turn(request, messages)
+            candidates = worker.source_runtime.facts.list_candidates(run.id)
+            if not candidates:
+                return ToolTurn(tool_calls=[ToolCall(
+                    id="search-1", name="course_source_search",
+                    arguments={"query": "official guide"},
+                )])
+            return ToolTurn(tool_calls=[ToolCall(
+                id=f"fetch-{len(messages)}", name="course_source_fetch",
+                arguments={"candidate_id": candidates[0]["id"]},
+            )])
+
+    class Client:
+        def search(self, query):
+            return [{"url": "https://vuejs.org/guide", "title": "Vue Guide"}]
+
+    class UnverifiedIdentity:
+        def official_host(self, topic):
+            return "vuejs.org"
+
+        def verify(self, topic, url, deadline=None):
+            return None
+
+    worker = Worker(facts.path, provider=SearchingProvider())
+    worker.source_runtime.client = Client()
+    worker.source_runtime.identity = UnverifiedIdentity()
+    assert worker.run_once()
+
+    current = facts.get_run(run.id)
+    assert current.status == "waiting_for_human"
+    assert current.stages[2].status == "waiting_for_human"
+    assert worker.execution.read_model(run.id).source_review is not None
+    assert worker.execution.list_commands(run.id)[-1].status == "APPLIED"
 
 
 def test_source_gate_interrupts_and_retry_resumes(tmp_path):

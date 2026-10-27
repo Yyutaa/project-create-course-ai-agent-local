@@ -28,6 +28,7 @@ from app.v0.runner import V0_QUALITY_LIMITATIONS
 from app.v0.source_audit import source_gate
 from app.v0.skill_rules import repair_rules_for
 from app.v0.source_facts import SourceFacts
+from app.v0.source_runtime import SourceEvidencePending
 from app.v0.token_preflight import TokenPreflightError
 from app.v0.schemas import (
     BLUEPRINT_CHAPTER_DEVIATION_REASON,
@@ -637,16 +638,21 @@ class WorkflowNodes:
             )
             result = BlueprintDraft.model_validate(record.content)
         else:
-            candidate = self.runner.executor.invoke(
-                "blueprint", state.run_id, inputs=pack.inputs,
-                source_runtime=source_runtime, topic=run.course_input.topic,
-                planning_goal=(
-                    f"规划恰好 {run.course_input.expected_chapters} 章；遵守已批准 Mission "
-                    "与来源边界，不得为凑章伪造内容或来源证据。"
-                    if run.planning_loop_version == 1 else None
-                ),
-                context_contract_version=run.context_contract_version,
-            )
+            try:
+                candidate = self.runner.executor.invoke(
+                    "blueprint", state.run_id, inputs=pack.inputs,
+                    source_runtime=source_runtime, topic=run.course_input.topic,
+                    planning_goal=(
+                        f"规划恰好 {run.course_input.expected_chapters} 章；遵守已批准 Mission "
+                        "与来源边界，不得为凑章伪造内容或来源证据。"
+                        if run.planning_loop_version == 1 else None
+                    ),
+                    context_contract_version=run.context_contract_version,
+                )
+            except SourceEvidencePending:
+                return self._source_gate_or_wait(
+                    state, index, "blueprint", "source_evidence_insufficient",
+                )
             if source_runtime is not None and not source_runtime.facts.summary_pack(
                 state.run_id
             ):
@@ -901,11 +907,16 @@ class WorkflowNodes:
                     if source_runtime is not None else None
                 ),
             )
-            candidate = self.runner.executor.invoke(
-                "writer", state.run_id, inputs=pack.inputs,
-                source_runtime=source_runtime, topic=run.course_input.topic,
-                context_contract_version=run.context_contract_version,
-            )
+            try:
+                candidate = self.runner.executor.invoke(
+                    "writer", state.run_id, inputs=pack.inputs,
+                    source_runtime=source_runtime, topic=run.course_input.topic,
+                    context_contract_version=run.context_contract_version,
+                )
+            except SourceEvidencePending:
+                return self._source_gate_or_wait(
+                    state, index, "generation", "source_evidence_insufficient",
+                )
             result = candidate.model_copy(
                 update={
                     "lesson_id": brief.lesson_id,

@@ -284,7 +284,7 @@ class SourceFacts:
             {
                 "document_id": document["id"],
                 "url": document["url"],
-                "title": document["title"],
+                "title": document["title"].strip() or document["url"][:200],
                 "excerpt": document["content"][:1500],
                 "content_hash": document["content_hash"],
             }
