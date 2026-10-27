@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from fastapi.testclient import TestClient
 
@@ -117,5 +118,40 @@ def test_stream_endpoint_rejects_unknown_run(tmp_path):
         with TestClient(app) as client:
             response = client.get("/api/v0/runs/missing/stream")
         assert response.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_stream_endpoint_returns_sse_for_existing_run(tmp_path, monkeypatch):
+    from fastapi.sse import ServerSentEvent
+    from app.api import stream_routes
+
+    store = FactStore(tmp_path / "facts.sqlite3")
+    store.migrate()
+    run, _ = store.create_run(
+        CourseInput(topic="Python", audience="初学者", goal="完成练习", language="zh"),
+        "start",
+    )
+    runner = V0Runner(FakeProvider(), store=store)
+
+    async def one_event(_store, run_id):
+        yield ServerSentEvent(
+            data={"run_id": run_id, "revision": 1},
+            event="run.changed",
+            id="1",
+        )
+
+    monkeypatch.setattr(stream_routes, "watch_run", one_event)
+    app.dependency_overrides[get_runner] = lambda: runner
+    try:
+        with TestClient(app) as client:
+            response = client.get(f"/api/v0/runs/{run.id}/stream")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert "event: run.changed" in response.text
+        data_line = next(line for line in response.text.splitlines() if line.startswith("data: "))
+        assert json.loads(data_line.removeprefix("data: ")) == {
+            "run_id": run.id, "revision": 1,
+        }
     finally:
         app.dependency_overrides.clear()

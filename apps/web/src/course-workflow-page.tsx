@@ -81,8 +81,13 @@ function CourseWorkflowPage({ runId, openConfig = false }: { runId?: string; ope
     queryKey: ["run-content", runId],
     queryFn: () => api.runContent(runId!),
     enabled: Boolean(runId),
-    refetchInterval: runningPollInterval(run, streamConnected, 1000),
+    refetchInterval: pollInterval(run, streamConnected),
   });
+  useEffect(() => {
+    if (runId && run?.revision !== undefined) {
+      void queryClient.invalidateQueries({ queryKey: ["run-content", runId] });
+    }
+  }, [queryClient, runId, run?.revision]);
   const intakeQuery = useQuery({
     queryKey: ["intake", runId],
     queryFn: () => api.intake(runId!),

@@ -1,9 +1,10 @@
 """SSE invalidation notices for a Run's public read models."""
 
 from collections.abc import AsyncIterator
+from typing import Annotated
 
 import anyio
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 
 from app.api.run_routes import RunnerDep
@@ -35,12 +36,20 @@ async def watch_run(
         await anyio.sleep(interval)
 
 
-@router.get("/{run_id}/stream", response_class=EventSourceResponse)
-def stream_run(run_id: str, runner: RunnerDep) -> EventSourceResponse:
+def existing_run_store(run_id: str, runner: RunnerDep) -> FactStore:
     try:
         runner.store.change_seq(run_id)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="Run 不存在") from error
-    return EventSourceResponse(
-        watch_run(runner.store, run_id), headers={"Cache-Control": "no-cache"}
-    )
+    return runner.store
+
+
+ExistingRunStoreDep = Annotated[FactStore, Depends(existing_run_store)]
+
+
+@router.get("/{run_id}/stream", response_class=EventSourceResponse)
+async def stream_run(
+    run_id: str, store: ExistingRunStoreDep,
+) -> AsyncIterator[ServerSentEvent]:
+    async for event in watch_run(store, run_id):
+        yield event
