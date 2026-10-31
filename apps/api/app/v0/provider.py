@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.v0.local_config import ConfigError, LocalConfigStore
 from app.v0.prompt_render import render_agent_messages
-from app.v0.token_preflight import preflight_request
+from app.v0.token_preflight import MAX_OUTPUT_TOKENS, preflight_request
 from app.v0.schemas import AgentRole, ArtifactRef
 from app.v0.source_tools import FetchInput, SearchInput
 
@@ -23,15 +23,37 @@ InputKind = Literal["intake", "mission", "blueprint", "batch_plan", "lesson", "q
 class ProviderError(RuntimeError):
     """A model request failed without exposing credentials or raw prompts."""
 
+    def __init__(
+        self, message: str, *, provider: str | None = None,
+        model: str | None = None, response_status: int | None = None,
+        error_code: str | None = None, input_tokens: int | None = None,
+        output_tokens: int | None = None,
+    ):
+        super().__init__(message)
+        self.provider = provider
+        self.model = model
+        self.response_status = response_status
+        self.error_code = error_code
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
 
 class TransientProviderError(ProviderError):
     """Only a confirmed timeout or HTTP 429 may receive one bounded retry."""
 
-    def __init__(self, reason: str):
+    def __init__(
+        self, reason: str, *, provider: str | None = None,
+        model: str | None = None,
+    ):
         if reason not in ("timeout", "http_429"):
             raise ValueError("未知临时故障类型")
         self.reason = reason
-        super().__init__("模型调用超时" if reason == "timeout" else "模型接口限流")
+        super().__init__(
+            "模型调用超时" if reason == "timeout" else "模型接口限流",
+            provider=provider, model=model,
+            response_status=429 if reason == "http_429" else None,
+            error_code=reason,
+        )
 
 
 class AgentInput(BaseModel):
@@ -71,6 +93,9 @@ class AgentResponse(BaseModel):
     payload: dict
     input_tokens: int | None = None
     output_tokens: int | None = None
+    provider: str | None = None
+    model: str | None = None
+    response_status: int | None = None
 
 
 class ToolCall(BaseModel):
@@ -88,6 +113,9 @@ class ToolTurn(BaseModel):
     tool_calls: list[ToolCall] = Field(default_factory=list)
     input_tokens: int | None = None
     output_tokens: int | None = None
+    provider: str | None = None
+    model: str | None = None
+    response_status: int | None = None
 
 
 SOURCE_FUNCTIONS = [
@@ -149,33 +177,57 @@ class RealProvider:
                 api_key=self.api_key,
                 timeout=240,
                 max_retries=0,
+                max_tokens=MAX_OUTPUT_TOKENS[request.role],
             )
             structured = model.with_structured_output(
                 request.output_schema, method="json_mode", include_raw=True
             )
             with tracing_context(enabled=False):
                 response = structured.invoke(messages)
+            usage = response["raw"].usage_metadata or {}
             result = response["parsed"]
             if not isinstance(result, dict) and response["parsing_error"] is None:
-                raise ProviderError(f"{request.role} 模型必须返回 JSON 对象")
+                raise ProviderError(
+                    f"{request.role} 模型必须返回 JSON 对象",
+                    provider="deepseek", model=self.model, response_status=200,
+                    error_code="invalid_json",
+                    input_tokens=usage.get("input_tokens"),
+                    output_tokens=usage.get("output_tokens"),
+                )
             if response["parsing_error"] is not None:
-                raise ProviderError(f"{request.role} 模型输出不是有效 JSON 对象")
-            usage = response["raw"].usage_metadata or {}
+                raise ProviderError(
+                    f"{request.role} 模型输出不是有效 JSON 对象",
+                    provider="deepseek", model=self.model, response_status=200,
+                    error_code="invalid_json",
+                    input_tokens=usage.get("input_tokens"),
+                    output_tokens=usage.get("output_tokens"),
+                )
             return AgentResponse(
                 role=request.role, payload=result,
                 input_tokens=usage.get("input_tokens"),
                 output_tokens=usage.get("output_tokens"),
+                provider="deepseek", model=self.model, response_status=200,
             )
         except APIStatusError as error:
             if error.status_code == 429:
-                raise TransientProviderError("http_429") from None
+                raise TransientProviderError(
+                    "http_429", provider="deepseek", model=self.model,
+                ) from None
             raise ProviderError(
-                f"{request.role} 模型接口返回 HTTP {error.status_code}"
+                f"{request.role} 模型接口返回 HTTP {error.status_code}",
+                provider="deepseek", model=self.model,
+                response_status=error.status_code,
+                error_code=f"http_{error.status_code}",
             ) from None
         except APITimeoutError:
-            raise TransientProviderError("timeout") from None
+            raise TransientProviderError(
+                "timeout", provider="deepseek", model=self.model,
+            ) from None
         except APIConnectionError:
-            raise ProviderError(f"{request.role} 模型接口不可用或超时") from None
+            raise ProviderError(
+                f"{request.role} 模型接口不可用或超时",
+                provider="deepseek", model=self.model, error_code="connection",
+            ) from None
         except ProviderError:
             raise
         except (OutputParserException, KeyError, TypeError, ValueError):
@@ -201,7 +253,7 @@ class RealProvider:
                     messages=messages,
                     tools=SOURCE_FUNCTIONS,
                     tool_choice="auto",
-                    max_tokens=32768 if request.role == "writer" else 8192,
+                    max_tokens=MAX_OUTPUT_TOKENS[request.role],
                 )
             message = response.choices[0].message
             calls = []
@@ -219,17 +271,28 @@ class RealProvider:
                 output_tokens=(
                     response.usage.completion_tokens if response.usage else None
                 ),
+                provider="deepseek", model=self.model, response_status=200,
             )
         except APIStatusError as error:
             if error.status_code == 429:
-                raise TransientProviderError("http_429") from None
+                raise TransientProviderError(
+                    "http_429", provider="deepseek", model=self.model,
+                ) from None
             raise ProviderError(
-                f"{request.role} 模型接口返回 HTTP {error.status_code}"
+                f"{request.role} 模型接口返回 HTTP {error.status_code}",
+                provider="deepseek", model=self.model,
+                response_status=error.status_code,
+                error_code=f"http_{error.status_code}",
             ) from None
         except APITimeoutError:
-            raise TransientProviderError("timeout") from None
+            raise TransientProviderError(
+                "timeout", provider="deepseek", model=self.model,
+            ) from None
         except APIConnectionError:
-            raise ProviderError(f"{request.role} 模型接口不可用或超时") from None
+            raise ProviderError(
+                f"{request.role} 模型接口不可用或超时",
+                provider="deepseek", model=self.model, error_code="connection",
+            ) from None
         except ProviderError:
             raise
         except (KeyError, TypeError, ValueError, IndexError):

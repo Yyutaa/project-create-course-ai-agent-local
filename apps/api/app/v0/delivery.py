@@ -6,7 +6,10 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from app.v0.observability.metrics import InvocationMetrics
+from app.v0.observability.tracing import TraceSpan, build_spans
 from app.v0.quality_loop import effective_character_count
+from app.v0.sensitive import safe_recorded_error
 from app.v0.storage import FactStore
 
 
@@ -18,6 +21,8 @@ class TraceCommand(BaseModel):
     id: str
     kind: str
     status: str
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 class TraceNode(BaseModel):
@@ -29,6 +34,10 @@ class TraceNode(BaseModel):
     status: str
     before_checkpoint_id: str | None
     after_checkpoint_id: str | None
+    failure_class: str | None = None
+    error_summary: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 class TraceArtifact(BaseModel):
@@ -38,15 +47,11 @@ class TraceArtifact(BaseModel):
     content_hash: str
 
 
-class TraceProviderCall(BaseModel):
+class TraceProviderCall(InvocationMetrics):
     id: str
     command_id: str | None
     node_execution_id: str | None
     role: str
-    status: str
-    duration_ms: int | None
-    input_tokens: int | None
-    output_tokens: int | None
 
 
 class TraceToolCall(BaseModel):
@@ -58,6 +63,8 @@ class TraceToolCall(BaseModel):
     status: str
     lease_epoch: int
     error_code: str | None
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 class TraceSourceClaim(BaseModel):
@@ -126,6 +133,7 @@ class DeliveryEvidence(BaseModel):
     artifacts: list[TraceArtifact]
     provider_calls: list[TraceProviderCall]
     tool_calls: list[TraceToolCall]
+    spans: list[TraceSpan]
     source_claims: list[TraceSourceClaim]
     findings: list[TraceFinding]
     verifications: list[TraceVerification]
@@ -143,7 +151,8 @@ class DeliveryStore:
     def read(self, trace_id: str) -> DeliveryEvidence:
         with self.facts.connect() as connection:
             run = connection.execute(
-                "SELECT runs.status, intakes.expected_chapters, "
+                "SELECT runs.status, runs.created_at, runs.updated_at, "
+                "intakes.expected_chapters, "
                 "intakes.min_effective_chars, intakes.token_limit FROM runs "
                 "JOIN intakes ON intakes.run_id=runs.id WHERE runs.id=?",
                 (trace_id,),
@@ -151,12 +160,15 @@ class DeliveryStore:
             if run is None:
                 raise KeyError(trace_id)
             commands = connection.execute(
-                "SELECT id, kind, status FROM commands WHERE run_id=? ORDER BY rowid",
+                "SELECT id, kind, status, created_at, updated_at "
+                "FROM commands WHERE run_id=? ORDER BY rowid",
                 (trace_id,),
             ).fetchall()
             nodes = connection.execute(
                 "SELECT id, command_id, node, attempt, lease_epoch, status, before_checkpoint_id, "
-                "after_checkpoint_id FROM node_executions WHERE run_id=? ORDER BY rowid",
+                "after_checkpoint_id, error, failure_class, created_at, updated_at "
+                "FROM node_executions "
+                "WHERE run_id=? ORDER BY rowid",
                 (trace_id,),
             ).fetchall()
             artifacts = connection.execute(
@@ -165,12 +177,16 @@ class DeliveryStore:
             ).fetchall()
             provider_calls = connection.execute(
                 "SELECT id, command_id, node_execution_id, role, status, "
-                "duration_ms, input_tokens, output_tokens FROM provider_calls "
+                "duration_ms, input_tokens, output_tokens, provider, model, "
+                "response_status, error_code, failure_class, error_summary, "
+                "started_at, finished_at "
+                "FROM provider_calls "
                 "WHERE run_id=? ORDER BY rowid", (trace_id,),
             ).fetchall()
             tool_calls = connection.execute(
                 "SELECT id, command_id, node_execution_id, tool_id, args_hash, "
-                "status, lease_epoch, error_code FROM tool_invocations "
+                "status, lease_epoch, error_code, created_at, updated_at "
+                "FROM tool_invocations "
                 "WHERE run_id=? ORDER BY rowid", (trace_id,),
             ).fetchall()
             source_claims = connection.execute(
@@ -381,16 +397,43 @@ class DeliveryStore:
                 expected_value=expected_value,
                 actual_value=actual_value,
             ))
+        trace_commands = [TraceCommand(**dict(row)) for row in commands]
+        trace_nodes = [TraceNode(
+            **{
+                key: value for key, value in dict(row).items()
+                if key not in ("error", "failure_class")
+            },
+            failure_class=(
+                row["failure_class"] if row["failure_class"] in (
+                    "transient", "deterministic", "business", "unknown",
+                ) else None
+            ),
+            error_summary=safe_recorded_error(row["error"]) if row["error"] else None,
+        ) for row in nodes]
+        trace_provider_calls = [
+            TraceProviderCall(**dict(row)) for row in provider_calls
+        ]
+        trace_tool_calls = [TraceToolCall(**dict(row)) for row in tool_calls]
         return DeliveryEvidence(
             trace_id=trace_id, run_status=run["status"],
-            commands=[TraceCommand(**dict(row)) for row in commands],
-            nodes=[TraceNode(**dict(row)) for row in nodes],
+            commands=trace_commands,
+            nodes=trace_nodes,
             artifacts=[TraceArtifact(
                 id=row["artifact_id"], version=row["version"],
                 kind=row["kind"], content_hash=row["content_hash"],
             ) for row in artifacts],
-            provider_calls=[TraceProviderCall(**dict(row)) for row in provider_calls],
-            tool_calls=[TraceToolCall(**dict(row)) for row in tool_calls],
+            provider_calls=trace_provider_calls,
+            tool_calls=trace_tool_calls,
+            spans=build_spans(
+                trace_id, run["status"], trace_commands, trace_nodes,
+                trace_provider_calls, trace_tool_calls,
+                run_started_at=run["created_at"],
+                run_finished_at=(
+                    run["updated_at"] if run["status"] in (
+                        "failed", "stopped", "published",
+                    ) else None
+                ),
+            ),
             source_claims=[TraceSourceClaim(**dict(row)) for row in source_claims],
             findings=list(findings.values()), verifications=verifications,
             decisions=[TraceDecision(

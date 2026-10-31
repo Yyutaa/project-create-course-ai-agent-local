@@ -52,7 +52,7 @@ def test_v4_run_migrates_without_retroactive_mission_gate(tmp_path):
     facts = FactStore(path)
     facts.migrate()
     facts.migrate()
-    assert facts.schema_version() == 20
+    assert facts.schema_version() == 21
     assert facts.mission_review_required("old-run") is False
 
 

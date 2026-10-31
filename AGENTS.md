@@ -340,6 +340,12 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 - 交付证据包从 `/api/v0/runs/{run_id}/evidence` 读取，包含关联对象与 normal、
   recovery、human 三条路径的可观测事实索引；`not_observed` 不得写成已通过。
   自动测试、手工验收和未验证分别标记，一次成功演示不代表生产保证。
+- SQLite v21 为 `provider_calls` 增加受控的 provider/model、HTTP 状态、安全错误码、
+  失败分类和错误摘要。成功与失败尝试都保留已知 Token 用量；缺失时保留 NULL，
+  不估算。`DeliveryEvidence.spans` 仅从已有 Run、Command、NodeExecution、
+  ProviderCall、ToolCall 的稳定 ID 重建父子关系，不另写 Span 事实，也不复制原文。
+  结构化输出与来源工具调用共用五角色的明确输出 Token 上限；Run 总 Token 上限仍
+  由不可变 Intake 的 `token_limit` 决定，不引入百万 Token 单位的隐藏预算。
 - 仅当并发积压、存储故障、恢复目标或权限隔离等风险有可复现观测证据，才评估
   队列、对象存储、更强运行时或鉴权隔离。不得把先进架构当作默认升级。
 - 本阶段不自动发布、不扩展云组件；仅新 Run 允许本文件约束的 Blueprint 有限再规划
@@ -405,7 +411,7 @@ FastAPI、SQLite 持久事实、LangGraph 七步控制流与本地 Worker 执行
 
 ## 课程生成约束
 
-- 现行 SQLite schema 版本为 19，可从 v7 起重复迁移。`intakes` 持久保存
+- 现行 SQLite schema 版本为 21，可从 v7 起重复迁移。`intakes` 持久保存
   `source_policy`、`expected_chapters`、`min_effective_chars`、`token_limit`，`runs` 保存
   `constraints_version`，`publications` 保存已发布课程。迁移前 Run 固定为版本 0，不追溯
   执行新约束；新 Run 固定为版本 1。

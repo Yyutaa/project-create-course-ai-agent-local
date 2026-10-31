@@ -138,12 +138,24 @@ class SourceToolRuntime:
             try:
                 payload = json.loads(turn.content or "")
             except (ValueError, TypeError):
-                raise ProviderError("模型最终输出不是有效 JSON 对象") from None
+                raise ProviderError(
+                    "模型最终输出不是有效 JSON 对象",
+                    provider=turn.provider, model=turn.model,
+                    response_status=turn.response_status, error_code="invalid_json",
+                    input_tokens=turn.input_tokens, output_tokens=turn.output_tokens,
+                ) from None
             if not isinstance(payload, dict):
-                raise ProviderError("模型最终输出不是 JSON 对象")
+                raise ProviderError(
+                    "模型最终输出不是 JSON 对象",
+                    provider=turn.provider, model=turn.model,
+                    response_status=turn.response_status, error_code="invalid_json",
+                    input_tokens=turn.input_tokens, output_tokens=turn.output_tokens,
+                )
             return AgentResponse(
                 role=request.role, payload=payload,
                 input_tokens=turn.input_tokens, output_tokens=turn.output_tokens,
+                provider=turn.provider, model=turn.model,
+                response_status=turn.response_status,
             )
         if not self.facts.summary_pack(request.run_id):
             raise SourceEvidencePending("来源工具轮次已用尽，需人工核验来源")

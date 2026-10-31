@@ -17,6 +17,13 @@ TOKEN_BUDGETS = {
     "reviewer": 24_000,
     "repair": 4_000,
 }
+MAX_OUTPUT_TOKENS = {
+    "mission": 8_192,
+    "blueprint": 8_192,
+    "writer": 32_768,
+    "reviewer": 8_192,
+    "repair": 8_192,
+}
 SUPPORTED_MODELS = frozenset({"deepseek-flash", "deepseek-v4-pro"})
 TOKENIZER_SHA256 = "89085f12ef79460ac5f66d1119325ddfc694b4ab209d80bbd81d35f081dc9614"
 

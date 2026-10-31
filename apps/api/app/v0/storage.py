@@ -83,6 +83,9 @@ class FactStore:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version == 19:
                 self._migrate_v20(connection)
+                version = 20
+            if version == 20:
+                self._migrate_v21(connection)
 
     def _migrate_legacy(self) -> None:
         with self.connect() as connection:
@@ -736,6 +739,29 @@ class FactStore:
                     "ALTER TABLE node_executions ADD COLUMN after_state_json TEXT"
                 )
         connection.execute("PRAGMA user_version=20")
+
+    @staticmethod
+    def _migrate_v21(connection: sqlite3.Connection) -> None:
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_calls'"
+        ).fetchone():
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(provider_calls)")
+            }
+            for column, definition in (
+                ("provider", "TEXT"),
+                ("model", "TEXT"),
+                ("response_status", "INTEGER"),
+                ("error_code", "TEXT"),
+                ("failure_class", "TEXT"),
+                ("error_summary", "TEXT"),
+            ):
+                if column not in columns:
+                    connection.execute(
+                        f"ALTER TABLE provider_calls ADD COLUMN {column} {definition}"
+                    )
+        connection.execute("PRAGMA user_version=21")
 
     def mission_review_required(self, run_id: str) -> bool:
         with self.connect() as connection:

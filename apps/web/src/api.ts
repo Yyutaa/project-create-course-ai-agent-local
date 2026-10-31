@@ -290,11 +290,12 @@ export type SourceReadModel = {
 export type DeliveryEvidence = {
   trace_id: string;
   run_status: string;
-  commands: { id: string; kind: string; status: string }[];
-  nodes: { id: string; command_id: string | null; node: string; attempt: number; lease_epoch: number; status: string }[];
+  commands: { id: string; kind: string; status: string; created_at: string | null; updated_at: string | null }[];
+  nodes: { id: string; command_id: string | null; node: string; attempt: number; lease_epoch: number; status: string; failure_class: string | null; error_summary: string | null; created_at: string | null; updated_at: string | null }[];
   artifacts: { id: string; version: number; kind: string; content_hash: string }[];
-  provider_calls: { id: string; command_id: string | null; node_execution_id: string | null; role: string; status: string; duration_ms: number | null; input_tokens: number | null; output_tokens: number | null }[];
-  tool_calls: { id: string; command_id: string | null; node_execution_id: string | null; tool_id: string; args_hash: string; status: string; lease_epoch: number; error_code: string | null }[];
+  provider_calls: { id: string; command_id: string | null; node_execution_id: string | null; role: string; status: string; duration_ms: number | null; started_at: string | null; finished_at: string | null; provider: string | null; model: string | null; input_tokens: number | null; output_tokens: number | null; total_tokens: number | null; response_status: number | null; error_code: string | null; failure_class: string | null; error_summary: string | null }[];
+  tool_calls: { id: string; command_id: string | null; node_execution_id: string | null; tool_id: string; args_hash: string; status: string; lease_epoch: number; error_code: string | null; created_at: string | null; updated_at: string | null }[];
+  spans: { trace_id: string; span_id: string; parent_span_id: string | null; kind: "run" | "command" | "node" | "provider" | "tool"; name: string; stage: string | null; status: string; started_at: string | null; finished_at: string | null; attributes: Record<string, string | number | boolean | null> }[];
   source_claims: { id: string; lesson_artifact_id: string; lesson_version: number; lesson_hash: string; line_number: number; claim_hash: string; document_id: string | null; document_hash: string | null; excerpt_hash: string | null; status: string }[];
   findings: {
     id: string; gate: string; rule_id: string;

@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 from time import monotonic
 from typing import Callable, TypeVar
 from uuid import uuid4
@@ -16,6 +17,8 @@ from app.v0.provider import (
     AgentRequest, AgentResponse, Provider, ProviderError, ToolTurn,
     TransientProviderError,
 )
+from app.v0.local_config import MODELS
+from app.v0.sensitive import safe_error
 from app.v0.storage import FactStore
 
 DEFAULT_CALL_LIMIT = 60
@@ -158,9 +161,37 @@ class BudgetStore:
 
     def finish(
         self, call_id: str, owner: str, epoch: int, status: str,
-        duration_ms: int, response: AgentResponse | None,
+        duration_ms: int, response: AgentResponse | ProviderError | Exception | None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
+        provider = getattr(response, "provider", None)
+        model = getattr(response, "model", None)
+        provider = provider if provider == "deepseek" else None
+        model = model if isinstance(model, str) and model in MODELS else None
+        response_status = getattr(response, "response_status", None)
+        response_status = (
+            response_status if isinstance(response_status, int)
+            and 100 <= response_status <= 599 else None
+        )
+        error_code = getattr(response, "error_code", None)
+        if status != "SUCCEEDED":
+            if not isinstance(error_code, str) or not re.fullmatch(
+                r"http_[1-5][0-9]{2}|timeout|connection|invalid_json", error_code,
+            ):
+                error_code = (
+                    "provider_error" if isinstance(response, ProviderError)
+                    else "unexpected_error"
+                )
+        else:
+            error_code = None
+        failure_class = (
+            None if status == "SUCCEEDED" else
+            "transient" if error_code in ("timeout", "http_429") else
+            "deterministic" if error_code == "invalid_json" else "unknown"
+        )
+        error_summary = (
+            safe_error(response) if isinstance(response, Exception) else None
+        )
         with self.facts.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             call = connection.execute(
@@ -176,9 +207,15 @@ class BudgetStore:
                 raise PermissionError("lease 已失效，禁止提交 Provider 结果")
             connection.execute(
                 "UPDATE provider_calls SET status=?, duration_ms=?, input_tokens=?, "
-                "output_tokens=?, finished_at=? WHERE id=? AND status='RESERVED'",
-                (status, duration_ms, response.input_tokens if response else None,
-                 response.output_tokens if response else None, now, call_id),
+                "output_tokens=?, provider=?, model=?, response_status=?, "
+                "error_code=?, failure_class=?, error_summary=?, finished_at=? "
+                "WHERE id=? AND status='RESERVED'",
+                (
+                    status, duration_ms, getattr(response, "input_tokens", None),
+                    getattr(response, "output_tokens", None), provider, model,
+                    response_status, error_code, failure_class, error_summary,
+                    now, call_id,
+                ),
             )
 
     def summary(self, run_id: str) -> BudgetSummary:
@@ -283,14 +320,14 @@ class BudgetedProvider:
                 self.budget.finish(
                     call_id, self.owner, self.epoch,
                     "FAILED_TIMEOUT" if error.reason == "timeout" else "FAILED_429",
-                    int((monotonic() - started) * 1000), None,
+                    int((monotonic() - started) * 1000), error,
                 )
                 retry_reason = error.reason
                 raise
-            except Exception:
+            except Exception as error:
                 self.budget.finish(
                     call_id, self.owner, self.epoch, "FAILED",
-                    int((monotonic() - started) * 1000), None,
+                    int((monotonic() - started) * 1000), error,
                 )
                 raise
             self.budget.finish(
@@ -330,5 +367,7 @@ class BudgetedProvider:
             lambda turn: AgentResponse(
                 role=request.role, payload={},
                 input_tokens=turn.input_tokens, output_tokens=turn.output_tokens,
+                provider=turn.provider, model=turn.model,
+                response_status=turn.response_status,
             ),
         )

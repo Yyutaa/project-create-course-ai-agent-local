@@ -161,11 +161,17 @@ def test_real_provider_uses_langchain_prompt_and_structured_output(monkeypatch):
     assert str(calls[0].url) == "https://example.invalid/v1/chat/completions"
     assert calls[0].headers["Authorization"] == "Bearer private-test-token"
     assert body["model"] == "classroom-model"
+    assert body["max_tokens"] == 8192
     assert body["response_format"] == {"type": "json_object"}
     assert "output_schema" in body["messages"][0]["content"]
     assert "Python 变量" in body["messages"][1]["content"]
     assert settings[0]["timeout"] == 240
     assert settings[0]["max_retries"] == 0
+
+    RealProvider.from_env().invoke(
+        mission_request().model_copy(update={"role": "writer"})
+    )
+    assert json.loads(calls[-1].content)["max_tokens"] == 32768
 
 
 def test_real_provider_rejects_non_object_json_without_echoing_content(monkeypatch):
@@ -178,6 +184,8 @@ def test_real_provider_rejects_non_object_json_without_echoing_content(monkeypat
                 "choices": [{"index": 0, "message": {
                     "role": "assistant", "content": '["private-do-not-echo"]',
                 }, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 2,
+                          "total_tokens": 9},
             },
         )
 
@@ -192,6 +200,8 @@ def test_real_provider_rejects_non_object_json_without_echoing_content(monkeypat
             mission_request()
         )
     assert "private-do-not-echo" not in str(caught.value)
+    assert (caught.value.input_tokens, caught.value.output_tokens) == (7, 2)
+    assert (caught.value.provider, caught.value.response_status) == ("deepseek", 200)
 
 
 def test_real_provider_does_not_retry_or_echo_network_errors(monkeypatch):
