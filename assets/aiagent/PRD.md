@@ -76,3 +76,11 @@ intake → mission → blueprint → batch_plan → generation → quality → r
 2. 阅读 [FE-TD.md](FE-TD.md)，从用户操作和界面状态进入代码。
 3. 阅读 [BE-TD.md](BE-TD.md)，沿 API → Command/Worker → LangGraph → 课程文件追踪一次 Run。
 4. 最后结合 `README.md` 的启动命令运行项目，并观察内置 Obsidian 样例课程。
+
+# 本地版官方来源能力（2026-10-24）
+
+本地版今后新建课程只开放“仅公开官方资料”；历史 Run 和已发布课程不追溯修改。
+Blueprint 内部研究及 Writer 可请求受控来源检索和抓取，但检索候选不等于课程证据；
+归属不明须人工复核，章节具体断言仍经独立来源审核。证据不足时工作流等待人工，
+学生正文不得以“来源未核验”等内部状态句段代替教学内容。人工确认来源身份不等于
+确认事实，更不等于 release 或发布。构建检查不是本期来源能力的一部分。

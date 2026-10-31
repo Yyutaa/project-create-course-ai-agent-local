@@ -257,3 +257,18 @@ npm run test:contract
 6. `workflow/services/`、`courses/`：Context Pack、质量、文件写入、构建与校验。
 
 调试时先读取 Run 事件、active Command、当前 NodeExecution 和 Trace，再查看课程 Workspace/Markdown 与 Artifact。不要仅凭某个 HTML 或数据库字段存在就判断整次 Run 成功。
+
+# 官方来源核验增量（SQLite v12）
+
+本地版 v12 对新 Run 固定公开官方一手来源政策，旧 Run 保持
+`source_evidence_version=0`。模型在 Blueprint/Writer 中只能提出
+`course_source_search` / `course_source_fetch` 函数请求；Worker 进程内的
+ToolRuntime 根据不可变三字段 ToolManifest、Pydantic 输入、lease 和预算执行。
+工具调用、候选、页面版本、断言关联和人工决定均为 SQLite 持久事实。
+Search 结果仅用于发现；已建立 npm/维护仓库文档主域锚点时定向检索并优先核验
+现有候选，不能把未抓取的搜索结果直接交给人工。来源不足时可通过精确
+`SOURCE_REVIEW retry_search` 最多继续查找 2 次，仍受原预算约束；排除候选不自动
+重跑，人工确认官方归属仍须明确依据。
+质量阶段对新 Run 增加独立来源 Gate；仅有已准入页面且具体断言有支持片段时，
+才缩小对应来源限制。人工来源批准不等于事实通过，也不改变 release 发布权限。
+接口与安全细节以 [官方来源技术设计](../../docs/source-verification-toolruntime-BE-TD.md) 为准。
